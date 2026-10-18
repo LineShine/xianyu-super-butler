@@ -386,7 +386,7 @@ export function Settings() {
                 <label className="switch-ios">
                   <input
                     type="checkbox"
-                    checked={Boolean(settings?.registration_enabled ?? false)}
+                    checked={Boolean(settings?.registration_enabled ?? true)}
                     onChange={(e) => setSettings(s => s ? { ...s, registration_enabled: e.target.checked } : null)}
                   />
                   <span className="switch-slider"></span>
@@ -400,7 +400,7 @@ export function Settings() {
                 <label className="switch-ios">
                   <input
                     type="checkbox"
-                    checked={Boolean(settings?.show_default_login_info ?? false)}
+                    checked={Boolean(settings?.show_default_login_info ?? true)}
                     onChange={(e) => setSettings(s => s ? { ...s, show_default_login_info: e.target.checked } : null)}
                   />
                   <span className="switch-slider"></span>
@@ -414,7 +414,7 @@ export function Settings() {
                 <label className="switch-ios">
                   <input
                     type="checkbox"
-                    checked={Boolean(settings?.login_captcha_enabled ?? true)}
+                    checked={Boolean(settings?.login_captcha_enabled ?? false)}
                     onChange={(e) => setSettings(s => s ? { ...s, login_captcha_enabled: e.target.checked } : null)}
                   />
                   <span className="switch-slider"></span>
@@ -447,7 +447,7 @@ export function Settings() {
                 <label className="switch-ios">
                   <input
                     type="checkbox"
-                    checked={Boolean(settings?.['account.face_verify_timeout_disable'] ?? true)}
+                    checked={Boolean(settings?.['account.face_verify_timeout_disable'] ?? false)}
                     onChange={(e) => setSettings(s => s ? { ...s, 'account.face_verify_timeout_disable': e.target.checked } : null)}
                   />
                   <span className="switch-slider"></span>

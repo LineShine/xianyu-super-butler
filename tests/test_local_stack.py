@@ -22,7 +22,14 @@ class LocalStackTests(unittest.TestCase):
         with patch('subprocess.run',side_effect=AssertionError('No container inspection')):
             config=read_config(self.root)
         self.assertEqual(config['services']['backend-web']['environment']['MYSQL_PASSWORD'],'a$#${literal} secret')
-        self.assertEqual(self.stack.ports(config),{'mysql':24306,'redis':27379,'backend-web':8189,'websocket':8190,'scheduler':8191,'frontend':9100})
+        self.assertEqual(self.stack.ports(config),{'mysql':24306,'redis':27379,'backend-web':8189,'websocket':8190,'scheduler':8191,'frontend':9999})
+        with (self.root/'.env').open('a') as out:out.write("FRONTEND_PORT=10009\n")
+        config=read_config(self.root)
+        self.assertEqual(self.stack.ports(config)['frontend'],10009)
+        for service in ('backend-web','websocket','scheduler'):
+            env=config['services'][service]['environment']
+            self.assertEqual(env['FRONTEND_PUBLIC_URL'],'http://127.0.0.1:10009')
+            self.assertEqual(env['CORS_ORIGINS'],'http://127.0.0.1:10009,http://localhost:10009')
     def test_port_conflict_stops_before_spawning(self):
         with socket.socket() as listener:
             listener.bind(('127.0.0.1',0));listener.listen()
@@ -41,6 +48,6 @@ class LocalStackTests(unittest.TestCase):
         (self.root/'.env').unlink();private_json(self.root/'yutaixian_data/native/metadata.json',{'status':'ready'})
         with self.assertRaisesRegex(RuntimeError,'缺少'):self.stack.ensure_config()
     def test_repeated_start_is_idempotent(self):
-        private_json(self.stack.state_path,{'phase':'running','url':'http://127.0.0.1:9100'})
+        private_json(self.stack.state_path,{'phase':'running','url':'http://127.0.0.1:9999'})
         with patch.object(self.stack,'owned_supervisor',return_value=True),patch.object(self.stack,'prepare') as prepare:
             self.stack.start(open_browser=False);prepare.assert_not_called()

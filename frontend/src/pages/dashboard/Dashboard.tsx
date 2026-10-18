@@ -169,11 +169,11 @@ export function Dashboard() {
 
   /** 骨架屏组件 */
   const SkeletonCard = () => (
-    <div className="stat-card min-w-[132px] sm:min-w-[148px] flex-1 animate-pulse">
-      <div className="w-12 h-12 bg-slate-200 dark:bg-slate-700 rounded-full" />
-      <div className="flex-1">
+    <div className="stat-card min-w-0 animate-pulse">
+      <div className="w-10 h-10 shrink-0 bg-slate-200 dark:bg-slate-700 rounded-lg" />
+      <div className="min-w-0 flex-1">
         <div className="h-8 bg-slate-200 dark:bg-slate-700 rounded w-16 mb-2" />
-        <div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-24" />
+        <div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-24 max-w-full" />
       </div>
     </div>
   )
@@ -193,8 +193,8 @@ export function Dashboard() {
         </button>
       </div>
 
-      {/* Stats cards */}
-      <div className="flex flex-nowrap gap-2 sm:gap-3 overflow-x-auto pb-1 scrollbar-visible">
+      {/* 卡片按内容区域宽度均分并换行，保留图标和完整名称所需空间。 */}
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] gap-3 sm:gap-4">
         {statsLoading ? (
           // 骨架屏
           Array.from({ length: statCards.length }).map((_, index) => (
@@ -209,14 +209,14 @@ export function Dashboard() {
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: index * 0.1, duration: 0.3 }}
-                className="stat-card min-w-[132px] sm:min-w-[148px] flex-1"
+                className="stat-card min-w-0"
               >
                 <div className={colorClasses[card.color as keyof typeof colorClasses]}>
                   <Icon className="w-6 h-6" />
                 </div>
-                <div className="min-w-0">
-                  <p className="stat-value truncate whitespace-nowrap">{card.value ?? '-'}</p>
-                  <p className="stat-label truncate whitespace-nowrap">{card.label}</p>
+                <div className="min-w-0 flex-1">
+                  <p className="stat-value break-words">{card.value ?? '-'}</p>
+                  <p className="stat-label mt-1 whitespace-normal break-words leading-5">{card.label}</p>
                 </div>
               </motion.div>
             )

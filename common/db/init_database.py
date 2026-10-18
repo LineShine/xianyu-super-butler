@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError, SAWarning
 from common.db.default_publish_addresses import REMOVED_PUBLISH_ADDRESS_PREFIXES, build_default_publish_addresses
 from common.db.auto_relist_schema import ensure_auto_relist_schema
 from common.db.session import async_engine, async_session_maker
+from common.db.default_system_settings import DEFAULT_SYSTEM_SETTINGS
 from common.utils.time_utils import get_beijing_now_naive
 from common.utils.security import generate_secret_key, get_password_hash
 DDL_LOCK_WAIT_TIMEOUT_SECONDS = 30
@@ -138,43 +139,10 @@ async def init_advisory_lock():
 
 class DatabaseInitializer:
     """数据库初始化器"""
-    DEFAULT_SETTINGS = (('disclaimer.title', '免责声明', '系统免责声明标题'),
-     ('disclaimer.content',
-      '数据存储说明\n'
-      '1. 本系统在运行过程中，为保障服务正常运行，会存储用户账号密码、登录 Cookie、商品信息、卡券信息等业务数据。\n'
-      '2. 上述数据仅用于系统功能运行、自动化处理和业务管理，不作为其他用途。\n'
-      '3. 请您自行确认服务器环境、账号权限和数据保管措施的安全性。\n'
-      '\n'
-      '用户须知\n'
-      '1. 用户应确保使用本系统的行为符合相关平台规则和法律法规。\n'
-      '2. 因用户自身违规操作、账号共享、密码泄露、服务器安全问题导致的损失，由用户自行承担。\n'
-      '3. 建议用户定期备份重要数据，因系统故障、第三方平台变更、不可抗力等导致的异常或损失，本系统不承担责任。\n'
-      '4. 本系统依赖第三方平台接口和网络环境，无法保证服务始终连续、稳定、无中断。\n'
-      '\n'
-      '隐私与风险提示\n'
-      '1. 请勿在未充分评估风险的情况下接入生产环境或敏感账号。\n'
-      '2. 使用本系统即表示您已充分理解并接受相关风险，并愿意自行承担相应责任。',
-      '系统免责声明正文'),
-     ('disclaimer.checkbox_text', '我已阅读并同意以上免责声明', '免责声明勾选提示文案'),
-     ('disclaimer.agree_button_text', '同意并继续', '免责声明同意按钮文案'),
-     ('disclaimer.disagree_button_text', '不同意', '免责声明不同意按钮文案'),
-     ('login.system_name', '鱼太咸', '登录页系统名称'),
-     ('login.system_title', '让店铺管理更轻松', '登录页系统标题'),
-     ('login.system_description', '自动回复、智能客服、订单管理、数据分析，一站式解决闲鱼运营难题', '登录页系统描述'),
-     ('theme.effect', 'solid', '系统主题效果（solid-纯色，gradient-炫彩）'),
-     ('theme.color_preset', 'ocean', '系统主题颜色预设'),
-     ('log.retention_days', '7', '日志保留天数（所有模块生效，修改后重启服务生效）'),
-     ('password_login.mode', 'browser', '账号密码登录模式：protocol/browser'),
-     ('captcha.real_mouse_weight_local', '1', 'real_mouse过滑块本地排队权重'),
-     ('captcha.real_mouse_weight_remote', '1', 'real_mouse过滑块远程排队权重'),
-     ('captcha.block_remote_calls', 'true', '是否禁止外部远程调用backend-web过滑块接口'),
-     ('captcha.local_slider_disabled', 'false', '本机是否停止处理滑块；缓存缺失时仍请求Token接口'),
-     ('captcha.slider_mode', 'browser', '滑块滑动方式：browser/real_mouse'),
-     ('token.api_mode', 'web', 'Token获取方式：web-网页接口/remote-远程接口'),
-     ('captcha.remote_processing_max', '20', '远程调用允许的最大处理中滑块日志数，0=不限制'),
-     ('captcha.remote_cooldown_seconds', '600', '远程调用达到处理中上限后的冷却秒数，0=不冷却'),
-     ('captcha.remote_cooldown_until', '0', '远程过滑块调用冷却截止时间戳'),
-     ('show_default_login_info', 'true', '登录页是否展示默认账号密码提示'))
+    DEFAULT_SETTINGS = tuple(
+        (key, value, description)
+        for key, (value, description) in DEFAULT_SYSTEM_SETTINGS.items()
+    )
     DEFAULT_SCHEDULED_TASKS = (('redelivery', '补发货任务', 5, True, '定时补发货任务'), ('rate', '补评价任务', 20, True, '定时补评价任务'), ('polish', '擦亮任务', 60, True, '定时擦亮商品任务'), ('day_switch', '平台日切换任务', 60, True, '定时执行平台日切换任务'), ('cleanup_browser_data', '清理被禁用账号浏览器数据任务', 600, False, '定时清理被禁用账号的浏览器数据'), ('cleanup_unconfigured_browser_data', '清理未配置账号密码的浏览器数据任务', 10800, False, '定时清理未配置登录账号密码（username 或 login_password 为空）账号的浏览器数据'), ('fetch_orders', '获取闲鱼订单任务', 600, True, '定时获取闲鱼订单数据'), ('fetch_pending_orders', '获取待发货订单任务', 60, True, '定时获取待发货订单并同步收货人姓名/手机号/地址等信息'), ('fetch_refund_orders', '退款订单获取任务', 120, True, '定时获取退款订单数据，更新订单状态并触发退款订单注销'), ('fetch_items', '获取闲鱼商品任务', 1200, True, '定时获取所有启用账号的闲鱼在售商品并入库（新增或更新）'), ('login_renew', '登录续期任务', 600, False, '定时执行闲鱼账号登录续期'), ('token_renewal', 'Token续期任务', 20, True, '定时为未来1小时内到期的启用账号预取IM Token，并写入续期到期日'), ('cookies_refresh', 'COOKIES续期任务', 600, False, '定时执行闲鱼账号浏览器COOKIES续期'), ('api_cookie_renew', '接口续期Cookies任务', 3600, True, '定时通过 hasLogin.do 接口为启用账号续期Cookies并同步Set-Cookie'), ('close_notice', '关闭账号消息通知任务', 600, False, '定时关闭账号消息通知'), ('red_flower', '求小红花任务', 300, True, '定时自动求小红花'), ('db_backup', '数据库备份任务', 3600, True, '定时备份数据库所有表结构与数据到文件'), ('delivery_timeout', '发货超时检测任务', 60, True, '定时将超过阈值仍处于 unknown 的自动发货消息日志标记为 timeout'), ('listing_monitor', '商品监控任务', 60, True, '定时执行商品监控：按监控类型调用闲鱼搜索接口采集商品并入库，每次记录监控日志'), ('seller_fill', '采集商品卖家ID补全', 60, True, '定时查询采集商品中卖家ID为空的数据，调用商品详情接口补全卖家真实ID与详情'), ('dm_send', '采集商品发送私信', 60, True, '定时查询卖家ID已补全且未私信的采集商品，用监控任务配置的私信账号发起私信'), ('auto_order', '采集商品自动下单', 60, True, '定时查询已私信且未下单的采集商品，用监控任务配置的下单账号创建订单（拍下，不自动付款）'), ('image_cleanup', '图片清理', 1200, True, '定时扫描卡券与素材库专属图片目录，删除已删除对象遗留的孤儿图片（仅清理各自目录，不影响其它功能图片）'), ('auto_relist_scan', '商品自动续售', 5, True, '检测已成交并完成发货的商品，确认旧商品下架后使用原素材自动续售'))
     TABLES_DDL = {
         'ytx_users': """

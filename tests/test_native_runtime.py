@@ -34,6 +34,81 @@ class NativeDatabaseTests(unittest.TestCase):
         stack=LocalStack(root);self.addCleanup(stack.cleanup_children)
         config=read_config(root);infra=NativeInfrastructure(stack,config);infra.prepare_tools();infra.start();check_native(config)
         return stack,config,infra
+
+    def test_system_defaults_on_fresh_install_and_existing_settings(self):
+        """Both initialization paths seed the product defaults and preserve user edits."""
+        import asyncio
+        from unittest.mock import patch
+        from sqlalchemy import text
+        from sqlalchemy.engine import URL
+        from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+        from common.db.default_system_settings import DEFAULT_SYSTEM_SETTINGS
+        from common.db.init_database import DatabaseInitializer
+        from common.models.system_setting import SystemSetting
+
+        sys.path.insert(0, str(ROOT / 'backend-web'))
+        from app.services.system_setting_service import SystemSettingService
+
+        _, config, _ = self.make_stack()
+        expected = {key: value for key, (value, _) in DEFAULT_SYSTEM_SETTINGS.items()}
+        self.assertEqual(expected['login_captcha_enabled'], 'false')
+        self.assertEqual(expected['registration_enabled'], 'true')
+        self.assertEqual(expected['show_default_login_info'], 'true')
+        self.assertEqual(expected['account.face_verify_timeout_disable'], 'false')
+        self.assertEqual(expected['navigation.hidden_menu_keys'], '[]')
+        self.assertEqual(expected['login.system_title'], '鱼太咸')
+        self.assertEqual(expected['disclaimer.title'], '使用说明')
+        for key in ('smtp_user', 'smtp_password', 'security.jwt_secret_key', 'security.internal_api_token'):
+            self.assertNotIn(key, expected)
+        self.assertEqual(expected['captcha.remote_cooldown_until'], '0')
+
+        async def check():
+            engine = create_async_engine(URL.create(
+                'mysql+asyncmy', username='fixture', password='test-secret', host='127.0.0.1',
+                port=int(config['services']['mysql']['ports'][0]['published']), database='fixture',
+            ))
+            sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+            async def snapshot():
+                async with sessions() as session:
+                    result = await session.execute(text('SELECT `key`, value, description, updated_at FROM ytx_system_settings ORDER BY `key`'))
+                    return result.all()
+
+            try:
+                async with engine.begin() as connection:
+                    await connection.run_sync(SystemSetting.__table__.create)
+                with patch('common.db.init_database.async_session_maker', sessions):
+                    await DatabaseInitializer().init_system_settings()
+                    self.assertEqual({row[0]: row[1] for row in await snapshot()}, expected)
+
+                    # The Web fallback must also work with an empty settings table.
+                    async with sessions.begin() as session:
+                        await session.execute(text('DELETE FROM ytx_system_settings'))
+                    async with sessions() as session:
+                        self.assertEqual(await SystemSettingService(session).list_settings(), expected)
+
+                    # Restart/upgrade must not reset saved switches, branding or credentials.
+                    async with sessions() as session:
+                        service = SystemSettingService(session)
+                        await service.set_settings({
+                            'login_captcha_enabled': ('true', None),
+                            'registration_enabled': ('false', None),
+                            'show_default_login_info': ('false', None),
+                            'account.face_verify_timeout_disable': ('true', None),
+                            'navigation.hidden_menu_keys': ('["product-monitor"]', None),
+                            'login.system_title': ('保留已保存标题', None),
+                            'smtp_password': ('fixture-only-password', None),
+                        })
+                    before = await snapshot()
+                    await DatabaseInitializer().init_system_settings()
+                    async with sessions() as session:
+                        await SystemSettingService(session).ensure_default_settings()
+                    self.assertEqual(await snapshot(), before)
+            finally:
+                await engine.dispose()
+
+        asyncio.run(check())
+
     def test_schema_migration_content_restart_and_ttl(self):
         source,sc,si=self.make_stack();destination,dc,di=self.make_stack()
         mapping=json.loads((ROOT/'config/migration-map.json').read_text())

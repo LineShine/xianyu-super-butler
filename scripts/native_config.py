@@ -42,7 +42,7 @@ def read_config(root: Path, *, native=True) -> dict:
     template = json.loads((root / "config/native.json").read_text())
     result = {"services": {}}
     ports = {"backend-web": ("BACKEND_WEB_PORT", 8189, 8089), "websocket": ("WEBSOCKET_PORT", 8190, 8090),
-             "scheduler": ("SCHEDULER_PORT", 8191, 8091), "frontend": ("FRONTEND_PORT", 9100, 80),
+             "scheduler": ("SCHEDULER_PORT", 8191, 8091), "frontend": ("FRONTEND_PORT", 9999, 80),
              "mysql": ("LOCAL_MYSQL_PORT", 24306, 3306), "redis": ("LOCAL_REDIS_PORT", 27379, 6379)}
     for name, (key, default, target) in ports.items():
         port = settings.get(key, str(default))
@@ -58,6 +58,8 @@ def read_config(root: Path, *, native=True) -> dict:
         result["services"][name] = {"environment": environment, "ports": [{"host_ip": "127.0.0.1", "published": port, "target": target}], "volumes": volumes}
     for name in ("backend-web", "websocket", "scheduler"):
         env = result["services"][name]["environment"]
+        frontend_port = result["services"]["frontend"]["ports"][0]["published"]
+        env["CORS_ORIGINS"] = settings.get("CORS_ORIGINS", f"http://127.0.0.1:{frontend_port},http://localhost:{frontend_port}")
         env["FRONTEND_PUBLIC_URL"] = settings.get("FRONTEND_PUBLIC_URL", "http://127.0.0.1:" + result["services"]["frontend"]["ports"][0]["published"])
         env["BACKEND_WEB_PUBLIC_URL"] = settings.get("BACKEND_WEB_PUBLIC_URL", "http://127.0.0.1:" + result["services"]["backend-web"]["ports"][0]["published"])
         env["AUTO_START_WEBSOCKET"] = settings.get("AUTO_START_WEBSOCKET", "true")

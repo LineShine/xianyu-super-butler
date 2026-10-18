@@ -183,6 +183,8 @@ class LocalStack:
                 probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 try:
                     probe.bind(("127.0.0.1", port))
+                except PermissionError:
+                    raise RuntimeError(f"当前用户没有监听端口 {port} 的权限；请使用 1024 及以上端口，或先配置系统管理员授权。")
                 except OSError:
                     raise RuntimeError(f"端口 {port} 被其他程序占用，请关闭该程序后重试。")
 
