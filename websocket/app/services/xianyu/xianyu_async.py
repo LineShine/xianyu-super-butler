@@ -24,6 +24,7 @@ from common.utils.xianyu_utils import (
 from common.utils.time_utils import get_beijing_now_naive
 from common.utils.text_utils import safe_str
 from common.services.im_registration import (
+    IM_REGISTRATION_UA,
     ImRegistrationError, is_im_auth_failure, validate_im_registration, get_im_sync_state,
 )
 from app.services.xianyu.connection_manager import ConnectionManager, ConnectionState
@@ -31,6 +32,7 @@ from app.services.xianyu.connection_errors import (
     is_network_connection_error, is_token_or_session_failure,
 )
 from app.services.xianyu.token_manager import TokenManager
+from app.services.xianyu.outgoing_message_tracker import outgoing_message_tracker
 
 # 配置常量
 WEBSOCKET_URL = os.getenv('WEBSOCKET_URL', 'wss://wss-goofish.dingtalk.com/')
@@ -594,7 +596,7 @@ class XianyuAsync:
                 "cache-header": "app-key token ua wv",
                 "app-key": "444e9908a51d1cb236a27862abc769c9",
                 "token": self.current_token,
-                "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "ua": IM_REGISTRATION_UA,
                 "dt": "j",
                 "wv": "im:3,au:3,sy:6",
                 "sync": "0,0;0;0;",
@@ -727,19 +729,19 @@ class XianyuAsync:
         
         logger.info(f"【{self.cookie_id}】任务重置完成，可以立即创建新的心跳任务")
     
-    async def _handle_message_with_semaphore(self, message_data: dict, websocket):
+    async def _handle_message_with_semaphore(self, message_data: dict, websocket, *, acknowledge: bool = True):
         """带信号量的消息处理包装器，防止并发任务过多"""
         async with self.message_semaphore:
             self.active_message_tasks += 1
             try:
-                await self.handle_message(message_data, websocket)
+                await self.handle_message(message_data, websocket, acknowledge=acknowledge)
             finally:
                 self.active_message_tasks -= 1
                 # 定期记录活跃任务数（每100个任务记录一次）
                 if self.active_message_tasks % 100 == 0 and self.active_message_tasks > 0:
                     logger.info(f"【{self.cookie_id}】当前活跃消息处理任务数: {self.active_message_tasks}")
     
-    async def handle_message(self, message_data: dict, websocket):
+    async def handle_message(self, message_data: dict, websocket, *, acknowledge: bool = True):
         """
         处理接收到的消息
         
@@ -1041,7 +1043,7 @@ class XianyuAsync:
                 self.message_handler.set_card_update_message_handler(on_card_update_message)
             
             # 处理消息
-            await self.message_handler.handle_message(message_data, websocket)
+            await self.message_handler.handle_message(message_data, websocket, acknowledge=acknowledge)
             
         except Exception as e:
             logger.error(f"【{self.cookie_id}】处理消息异常: {e}")
@@ -2037,7 +2039,21 @@ class XianyuAsync:
             logger.error(f"[{msg_time}] 【{self.cookie_id}】处理确认收货图片失败: {e}")
             return None
     
-    async def send_msg(self, websocket, chat_id: str, send_user_id: str, content: str):
+    async def _send_with_echo_tracking(self, websocket, payload: str, chat_id: str,
+                                       content: str, *, automatic: bool = True):
+        # Register before yielding to send(): the other IM connection may receive
+        # the echo before this coroutine resumes. Failed writes must not suppress
+        # a later manual message with the same text.
+        token = (outgoing_message_tracker.remember(self.cookie_id, chat_id, content)
+                 if automatic else None)
+        try:
+            await websocket.send(payload)
+        except BaseException:
+            outgoing_message_tracker.discard(token)
+            raise
+
+    async def send_msg(self, websocket, chat_id: str, send_user_id: str, content: str,
+                       *, automatic: bool = True):
         """发送文本消息（参照旧框架实现）
 
         消息通过 WebSocket 发出后立即返回成功（不阻塞自动回复）。
@@ -2102,7 +2118,9 @@ class XianyuAsync:
             except Exception as reg_e:
                 logger.warning(f"【{self.cookie_id}】注册发送结果检测失败（不影响发送）: {self._safe_str(reg_e)}")
 
-            await websocket.send(msg_str)
+            await self._send_with_echo_tracking(
+                websocket, msg_str, chat_id, content, automatic=automatic
+            )
             logger.info(f"【{self.cookie_id}】发送消息成功: {content[:50]}...")
             return {
                 "success": True,
@@ -2854,7 +2872,7 @@ class XianyuAsync:
             # 打印完整的发送消息用于调试
             logger.debug(f"【{self.cookie_id}】发送图片WebSocket消息: {json.dumps(msg, ensure_ascii=False)[:500]}...")
             
-            await websocket.send(json.dumps(msg))
+            await self._send_with_echo_tracking(websocket, json.dumps(msg), chat_id, cdn_url)
             logger.info(f"【{self.cookie_id}】发送图片消息成功: {cdn_url}")
             return {
                 "success": True,

@@ -39,6 +39,7 @@ const MATCHED_RULE_TYPE_LABELS: Record<string, string> = {
 const DECISION_REASON_LABELS: Record<string, string> = {
   processing: '处理中',
   self_message: '本人发送消息',
+  automatic_message_echo: '自动消息回传（不暂停回复）',
   system_message: '系统消息',
   auto_delivery_trigger: '自动发货触发消息',
   item_not_belong: '商品不属于当前账号',

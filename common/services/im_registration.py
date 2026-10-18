@@ -1,6 +1,16 @@
 """Validate IM authentication separately from the WebSocket transport."""
 from __future__ import annotations
 
+# Both clients must register as the same supported IM protocol implementation.
+IM_REGISTRATION_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/146.0.0.0 Safari/537.36 "
+    "DingTalk(2.1.5) OS(Windows/10) "
+    "Browser(Chrome/146.0.0.0) DingWeb/2.1.5 "
+    "IMPaaS DingWeb/2.1.5"
+)
+
 
 def is_im_auth_failure(response: dict) -> bool:
     if not isinstance(response, dict):

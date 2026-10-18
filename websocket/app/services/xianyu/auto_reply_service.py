@@ -42,6 +42,7 @@ from common.services.remote_location_message_api import (
 from common.utils.default_reply_location import validate_external_contact_fields
 
 from app.services.xianyu.resource_manager import pause_manager
+from app.services.xianyu.outgoing_message_tracker import outgoing_message_tracker
 from app.services.xianyu.auto_reply_log_service import AutoReplyLogService
 
 
@@ -634,6 +635,16 @@ class AutoReplyService:
             myid = getattr(self.xianyu_instance, 'myid', self.cookie_id)
             self._merge_log_context(log_payload, myid=myid)
             if send_user_id == myid:
+                raw_message = parsed_message.get("raw_message") or {}
+                message_body = raw_message.get("1", {}) if isinstance(raw_message, dict) else {}
+                timestamp_ms = message_body.get("5") if isinstance(message_body, dict) else None
+                if outgoing_message_tracker.consume_echo(
+                    self.cookie_id, chat_id, send_message, timestamp_ms
+                ):
+                    log_payload["process_status"] = "skipped"
+                    log_payload["decision_reason"] = "automatic_message_echo"
+                    logger.info(f"【{self.cookie_id}】自动消息回传，保持自动回复启用: chat_id={chat_id}")
+                    return
                 # 手动发出消息。启用 AI 专用暂停时，仅暂停同买家同商品的 AI；
                 # 未启用时保留原有按会话暂停全部自动回复的行为。
                 log_payload["process_status"] = "skipped"
@@ -2283,11 +2294,11 @@ class AutoReplyService:
             )
             # 2. 内存未命中时，从日志表反查最近一条买家消息兜底
             if not paused_context:
-                fallback = await self._lookup_buyer_context_from_db(chat_id, item_id)
+                fallback = await self._lookup_buyer_context_from_db(chat_id)
                 if fallback:
                     buyer_id, fallback_item_id = fallback
                     paused_context = pause_manager.pause_ai_reply(
-                        self.cookie_id, buyer_id, fallback_item_id, pause_minutes
+                        self.cookie_id, buyer_id, item_id or fallback_item_id, pause_minutes
                     )
 
             if not paused_context:

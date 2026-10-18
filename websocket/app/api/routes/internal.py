@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from common.services.account_cookie_service import merge_account_cookie_fields
 from common.services.captcha.concurrency import run_browser_task
@@ -50,6 +50,30 @@ class StartAccountRequest(BaseModel):
     """启动账号请求"""
     cookie_value: str | None = None  # 可选，不传则从数据库获取
     user_id: int | None = None
+
+
+class ForwardImPushRequest(BaseModel):
+    """Live sync entries; transport ACK headers stay on the source socket."""
+    sync_data: list[dict] = Field(min_length=1, max_length=100)
+
+
+@router.post("/accounts/{account_id}/im-push")
+async def forward_im_push(account_id: str, request: ForwardImPushRequest):
+    from app.services.xianyu.cookie_manager import get_manager
+
+    if any(not isinstance(entry.get("data"), str) for entry in request.sync_data):
+        raise HTTPException(status_code=422, detail="缺少有效的实时消息数据")
+    manager = get_manager()
+    instance = manager.instances.get(account_id)
+    if instance is None or not manager.get_cookie_status(account_id):
+        return {"success": False, "code": 409, "message": "账号未启用或未运行"}
+    ws = getattr(instance, 'ws', None)
+    if (ws is None or getattr(instance, '_registered_ws', None) is not ws
+            or instance.connection_manager.is_ws_closed(ws)):
+        raise HTTPException(status_code=503, detail="账号消息连接暂不可用")
+    frame = {"body": {"syncPushPackage": {"data": request.sync_data}}}
+    instance._create_tracked_task(instance._handle_message_with_semaphore(frame, ws, acknowledge=False))
+    return {"success": True, "code": 202, "message": "已接收实时消息"}
 
 
 class SendMessageRequest(BaseModel):
@@ -1002,6 +1026,7 @@ async def send_message(account_id: str, request: SendMessageRequest):
             chat_id=request.chat_id,
             send_user_id=request.to_user_id,
             content=request.message,
+            automatic=False,
         )
 
         # WebSocket 发送层失败：直接判失败

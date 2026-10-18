@@ -140,9 +140,14 @@ async def chat_new_websocket(
     manager = get_im_session_manager()
     client = manager.clients.get(account_id)
     if not client or not client.is_connected:
-        logger.warning(f"【{account_id}】IM 客户端未连接，拒绝注册前端实时消息订阅")
-        await websocket.close(code=WS_CLOSE_IM_OFFLINE)
-        return
+        # A browser reconnect after a service restart must also restore the
+        # upstream IM connection; retrying this subscription alone never did.
+        try:
+            client = await manager.get_or_connect(account_id)
+        except Exception as exc:
+            logger.warning(f"【{account_id}】恢复在线聊天 IM 连接失败: {type(exc).__name__}")
+            await websocket.close(code=WS_CLOSE_IM_OFFLINE)
+            return
 
     try:
         # 注册到管理器，开始接收推送

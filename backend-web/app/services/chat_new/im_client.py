@@ -22,7 +22,7 @@ from sqlalchemy import text
 
 from app.services.websocket_client import websocket_client
 from common.db.session import async_session_maker
-from common.services.im_registration import ImRegistrationError, validate_im_registration, get_im_sync_state
+from common.services.im_registration import IM_REGISTRATION_UA, ImRegistrationError, validate_im_registration, get_im_sync_state
 from common.utils.cookie_refresh import (
     merge_cookies,
     update_account_cookies_in_db,
@@ -136,6 +136,10 @@ class GoofishImClient:
 
         # 推送消息回调列表（用于向前端 WebSocket 转发实时消息）
         self._push_callbacks: List = []
+        # Either IM connection may receive a push. Forward independently of UI
+        # subscribers, without blocking the receive loop on HTTP retries.
+        self._automation_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        self._automation_task: Optional[asyncio.Task] = None
 
     # ==================== 连接管理 ====================
 
@@ -907,14 +911,7 @@ class GoofishImClient:
                 "cache-header": "app-key token ua wv",
                 "app-key": "444e9908a51d1cb236a27862abc769c9",
                 "token": self.token,
-                "ua": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/146.0.0.0 Safari/537.36 "
-                    "DingTalk(2.1.5) OS(Windows/10) "
-                    "Browser(Chrome/146.0.0.0) DingWeb/2.1.5 "
-                    "IMPaaS DingWeb/2.1.5"
-                ),
+                "ua": IM_REGISTRATION_UA,
                 "dt": "j",
                 "wv": "im:3,au:3,sy:6",
                 "sync": "0,0;0;0;",
@@ -1184,6 +1181,19 @@ class GoofishImClient:
             if not data_list:
                 return
 
+            # History/request responses never enter this live-push path.
+            valid_data = [entry for entry in data_list if isinstance(entry, dict) and isinstance(entry.get("data"), str)]
+            for offset in range(0, len(valid_data), 100):
+                try:
+                    self._automation_queue.put_nowait(valid_data[offset:offset + 100])
+                except asyncio.QueueFull:
+                    logger.error(f"【{self.account_id}】实时消息自动处理转发队列已满，本批未转发")
+                    break
+            if not self._automation_queue.empty() and (
+                self._automation_task is None or self._automation_task.done()
+            ):
+                self._automation_task = asyncio.create_task(self._forward_automation_pushes())
+
             # 延迟初始化解析器
             if not hasattr(self, "_push_parser"):
                 from .push_message_parser import PushMessageParser
@@ -1205,6 +1215,21 @@ class GoofishImClient:
                         logger.warning(f"【{self.account_id}】推送回调异常: {cb_e}")
         except Exception as e:
             logger.warning(f"【{self.account_id}】处理推送消息异常: {e}")
+
+    async def _forward_automation_pushes(self):
+        """Drain accepted pushes even if the UI connection closes meanwhile."""
+        while not self._automation_queue.empty():
+            batch = self._automation_queue.get_nowait()
+            try:
+                result = await websocket_client.forward_im_push(self.account_id, batch)
+                if result.get("success"):
+                    logger.info(f"【{self.account_id}】实时消息已转入自动处理: count={len(batch)}")
+                else:
+                    logger.warning(f"【{self.account_id}】实时消息自动处理未接收: code={result.get('code')}")
+            except Exception as exc:
+                logger.error(f"【{self.account_id}】实时消息自动处理转发失败: {type(exc).__name__}")
+            finally:
+                self._automation_queue.task_done()
 
     async def _heartbeat_loop(self):
         """心跳保活循环"""

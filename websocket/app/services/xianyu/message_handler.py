@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import hashlib
 import time
 from typing import Dict, Any, Optional, Callable
 
@@ -180,6 +181,9 @@ class MessageHandler:
         try:
             if isinstance(message_data, dict) and "1" in message_data:
                 message_1 = message_data.get("1")
+                # Standard IM message ID, also used by the online-chat parser.
+                if isinstance(message_1, dict) and message_1.get("3"):
+                    return str(message_1["3"])
                 if isinstance(message_1, dict) and "10" in message_1:
                     message_10 = message_1.get("10")
                     if isinstance(message_10, dict) and "bizTag" in message_10:
@@ -218,6 +222,26 @@ class MessageHandler:
         
         return None
     
+    async def claim_message(self, message: dict) -> bool:
+        """Atomically deduplicate native and forwarded copies before side effects."""
+        message_id = self.extract_message_id(message)
+        if not message_id:
+            # Include the full event and timestamp for card updates without IDs.
+            payload = json.dumps(message, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+            message_id = 'payload:' + hashlib.sha256(payload.encode()).hexdigest()
+        async with self.processed_message_ids_lock:
+            now = time.time()
+            previous = self.processed_message_ids.get(message_id)
+            if previous is not None and now - previous < self.message_expire_time:
+                return False
+            self.processed_message_ids[message_id] = now
+            if len(self.processed_message_ids) > self.processed_message_ids_max_size:
+                self.processed_message_ids = {
+                    key: stamp for key, stamp in self.processed_message_ids.items()
+                    if now - stamp < self.message_expire_time
+                }
+            return True
+
     async def is_message_processed(self, message_id: str) -> bool:
         """检查消息是否已处理"""
         async with self.processed_message_ids_lock:
@@ -546,11 +570,12 @@ class MessageHandler:
             logger.warning(f"【{self.cookie_id}】判断普通文本消息失败: {safe_str(e)}")
             return False
     
-    async def handle_message(self, message_data: dict, websocket) -> bool:
+    async def handle_message(self, message_data: dict, websocket, *, acknowledge: bool = True) -> bool:
         """处理消息"""
         try:
             # 发送ACK确认消息（参照旧框架，必须发送否则服务器会断开连接）
-            await self._send_ack(message_data, websocket)
+            if acknowledge:
+                await self._send_ack(message_data, websocket)
             
             # 检查是否为同步包
             if self.is_sync_package(message_data):
@@ -641,12 +666,9 @@ class MessageHandler:
         """处理单条消息（参照旧框架message_handler_core.py）"""
         try:
             # 提取消息ID进行去重
-            message_id = self.extract_message_id(message)
-            if message_id:
-                if await self.is_message_processed(message_id):
-                    logger.debug(f"【{self.cookie_id}】消息已处理，跳过: {message_id[:20]}...")
-                    return True
-                await self.mark_message_processed(message_id)
+            if not await self.claim_message(message):
+                logger.debug(f"【{self.cookie_id}】消息已处理，跳过重复推送")
+                return True
             
             # 过滤平台系统提示 / 营销活动类消息（如"打气"任务提醒）：
             # 这类消息会命中 is_chat_message（含 reminderContent），但并非真实聊天，
@@ -730,7 +752,7 @@ class MessageHandler:
             
             # 判断是否是自己发出的消息（参照旧框架，使用myid判断）
             if send_user_id == self.myid:
-                logger.info(f"[{msg_time}] 【手动发出】 商品({item_id}): {send_message}")
+                logger.info(f"[{msg_time}] 【自己发出】 商品({item_id}): {send_message}")
             else:
                 logger.warning(f"[{msg_time}] 【收到】用户: {send_user_name}, 商品({item_id}): {send_message}")
         except Exception as e:

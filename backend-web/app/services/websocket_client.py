@@ -107,6 +107,13 @@ class WebSocketServiceClient:
             logger.error(f"查询账号任务状态失败: {account_id}, 错误: {e}")
             return {"success": False, "message": f"查询账号任务状态失败: {str(e)}"}
 
+    async def forward_im_push(self, account_id: str, sync_data: list[dict]) -> dict:
+        """Forward live IM pushes to the account's existing automation connection."""
+        return await self.http_client.post(
+            f"{self.base_url}/internal/accounts/{account_id}/im-push",
+            json={"sync_data": sync_data}, timeout=4, max_retries=3,
+        )
+
     async def send_message(
         self,
         account_id: str,
