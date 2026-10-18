@@ -1,0 +1,28 @@
+/* 鱼太咸：沿用现有 Web 外观，统一所有业务页面的视觉组件。 */
+:root { --ytx-yellow:#ffe815; --ytx-ink:#111; }
+body {font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif!important;background:#f4f5f7!important;color:#111!important;-webkit-font-smoothing:antialiased}
+.card,.vben-card,.stat-card,.modal-content {border-radius:24px!important;background:#fff!important;border-color:rgba(0,0,0,.035)!important;box-shadow:0 8px 24px rgba(0,0,0,.04)!important}
+.vben-card-header {padding:22px 24px!important}.vben-card-body {padding:24px!important}
+.page-title {font-weight:800!important;font-size:28px!important;letter-spacing:-.03em}.page-description {color:#858a94!important;margin-top:8px!important}
+.btn-ios-primary {background:#ffe815!important;color:#111!important;border-color:transparent!important;font-weight:700!important;box-shadow:0 4px 14px rgba(255,232,21,.18)!important}
+.btn-ios-primary:hover:not(:disabled) {background:#ffd600!important;transform:translateY(-1px)}
+.btn-ios-primary,.btn-ios-secondary,.btn-ios-danger {border-radius:16px!important;min-height:40px;padding:10px 16px!important}
+.btn-ios-secondary {background:#f7f8fa!important;color:#40444b!important;border-color:transparent!important}
+.input-ios,.select-ios {background:#f7f8fa!important;border:1px solid transparent!important;border-radius:14px!important;color:#111!important}
+.input-ios:focus,.select-ios:focus {background:#fff!important;border-color:#ffe815!important;box-shadow:0 0 0 4px rgba(255,232,21,.22)!important;outline:none}
+.bg-slate-50,.bg-gray-50 {background-color:#f4f5f7!important}
+aside {background:#fff!important;border-color:#f0f1f3!important;box-shadow:4px 0 24px rgba(0,0,0,.02)!important}
+aside nav a,aside nav button {border-radius:16px!important}aside nav a[aria-current="page"] {background:#ffe815!important;color:#111!important;font-weight:700!important;box-shadow:0 4px 12px rgba(255,232,21,.17)}
+.bg-blue-500,.bg-blue-600 {background-color:#ffe815!important;color:#111!important}
+.text-blue-500,.text-blue-600 {color:#8b7200!important}.bg-blue-50 {background-color:#fffbe5!important}
+.border-blue-500,.border-blue-600 {border-color:#e5c800!important}
+.table-ios {border-radius:24px!important;overflow:hidden}.table-ios th {background:#fafafa!important;color:#737985!important;font-weight:600!important}
+.modal-backdrop {backdrop-filter:blur(8px)}
+input[type=checkbox] {accent-color:#b99b00}
+
+.ytx-login {position:relative;isolation:isolate;background:#f4f5f7!important;overflow:hidden}
+.ytx-login::before,.ytx-login::after {content:"";position:fixed;z-index:-1;width:60vw;height:60vh;border-radius:50%;filter:blur(120px);pointer-events:none}
+.ytx-login::before {top:-15%;left:-10%;background:#fef08a66}.ytx-login::after {bottom:-15%;right:-10%;background:#bfdbfe55}
+.ytx-login-card {position:relative;background:rgba(255,255,255,.8);backdrop-filter:blur(48px);padding:36px;border-radius:48px;border:1px solid #fff;box-shadow:0 20px 60px -15px rgba(0,0,0,.05)}
+.ytx-login-card .btn-ios-primary {height:52px;font-size:16px}.ytx-login-card .input-ios {min-height:48px}
+@media(max-width:640px) {.ytx-login-card {padding:24px;border-radius:32px}}

@@ -1,0 +1,744 @@
+import { useState, useEffect, useCallback } from 'react'
+import { Navigate } from 'react-router-dom'
+import { Settings as SettingsIcon, Save, Mail, RefreshCw, Eye, EyeOff, Copy, Globe } from 'lucide-react'
+import {
+  buildHiddenMenuSettingsPayload,
+  getHiddenMenuKeysFromSettings,
+  getSystemSettings,
+  normalizeDisclaimerSettings,
+  normalizeLoginBrandingSettings,
+  updateSystemSettings,
+  updateDisclaimerSettings,
+  updateLoginBrandingSettings,
+  updateProxySettings,
+  updateThemeAppearanceSettings,
+  updateThemeFontSettings,
+  testEmailSend,
+} from '@/api/settings'
+import { useUIStore } from '@/store/uiStore'
+import { useAuthStore } from '@/store/authStore'
+import { PageLoading, ButtonLoading } from '@/components/common/Loading'
+import { getApiErrorMessage } from '@/utils/apiError'
+import { copyToClipboard } from '@/utils/clipboard'
+import { getExeForcedHiddenMenuKeys } from '@/config/navigation'
+import { applyThemeSettings, normalizeThemeAppearanceSettings, normalizeThemeFontSettings } from '@/utils/theme'
+import { DisclaimerSettingsCard } from './DisclaimerSettingsCard'
+import { LoginBrandingSettingsCard } from './LoginBrandingSettingsCard'
+import { MenuVisibilitySettings } from './MenuVisibilitySettings'
+import { ThemeAppearanceSettingsCard } from './ThemeAppearanceSettingsCard'
+import { ThemeFontSettingsCard } from './ThemeFontSettingsCard'
+import { ServiceRestartCard } from './ServiceRestartCard'
+import { PasswordLoginModeSetting } from './PasswordLoginModeSetting'
+import { SliderModeSetting } from './SliderModeSetting'
+import { TokenApiModeSetting } from './TokenApiModeSetting'
+import { useMenuVisibilityStore } from '@/store/menuVisibilityStore'
+import type {
+  DisclaimerSettings,
+  LoginBrandingSettings,
+  SystemSettings,
+  ThemeAppearanceSettings,
+  ThemeColorPreset,
+  ThemeEffect,
+  ThemeFontFamily,
+  ThemeFontSettings,
+} from '@/types'
+
+export function Settings() {
+  const { addToast } = useUIStore()
+  const { isAuthenticated, token, _hasHydrated, user } = useAuthStore()
+  const { isExeMode, setHiddenMenuKeys, setIsExeMode } = useMenuVisibilityStore()
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [loginBrandingSaving, setLoginBrandingSaving] = useState(false)
+  const [disclaimerSaving, setDisclaimerSaving] = useState(false)
+  const [hiddenMenuSaving, setHiddenMenuSaving] = useState(false)
+  const [themeAppearanceSaving, setThemeAppearanceSaving] = useState(false)
+  const [themeFontSaving, setThemeFontSaving] = useState(false)
+  // 代理设置独立保存状态：与页面右上角"保存设置"按钮的 saving 分离，互不影响
+  const [proxySaving, setProxySaving] = useState(false)
+  const [settings, setSettings] = useState<SystemSettings | null>(null)
+
+  // SMTP密码显示状态
+  const [showSmtpPassword, setShowSmtpPassword] = useState(false)
+
+  // 群二维码状态
+
+  // 测试邮件弹窗状态
+  const [showTestEmailModal, setShowTestEmailModal] = useState(false)
+  const [testEmail, setTestEmail] = useState('')
+  const [sendingTestEmail, setSendingTestEmail] = useState(false)
+  const loginBrandingSettings = normalizeLoginBrandingSettings(settings)
+  const disclaimerSettings = normalizeDisclaimerSettings(settings)
+  const themeAppearanceSettings = normalizeThemeAppearanceSettings(settings)
+  const themeFontSettings = normalizeThemeFontSettings(settings)
+
+  const loadSettings = async () => {
+    if (!_hasHydrated || !isAuthenticated || !token || !user?.is_admin) return
+    try {
+      setLoading(true)
+      const result = await getSystemSettings()
+      if (result.success && result.data) {
+        applyThemeSettings(result.data)
+        setSettings(result.data)
+        setIsExeMode(Boolean(result.data['runtime.is_exe_mode']))
+        setHiddenMenuKeys(getHiddenMenuKeysFromSettings(result.data))
+      }
+    } catch (error) {
+      addToast({ type: 'error', message: getApiErrorMessage(error, '加载系统设置失败') })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!_hasHydrated || !isAuthenticated || !token) return
+    if (!user?.is_admin) {
+      setLoading(false)
+      return
+    }
+    loadSettings()
+  }, [_hasHydrated, isAuthenticated, token, user?.is_admin])
+
+  const handleSave = async () => {
+    if (!settings) return
+    try {
+      setSaving(true)
+      const result = await updateSystemSettings(settings)
+      if (result.success) {
+        applyThemeSettings(settings)
+        setHiddenMenuKeys(getHiddenMenuKeysFromSettings(settings))
+        addToast({ type: 'success', message: '设置保存成功' })
+      } else {
+        addToast({ type: 'error', message: result.message || '保存失败' })
+      }
+    } catch (error) {
+      addToast({ type: 'error', message: getApiErrorMessage(error, '保存设置失败') })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleLoginBrandingChange = (key: keyof LoginBrandingSettings, value: string) => {
+    setSettings((current) => ({
+      ...(current ?? {}),
+      [key]: value,
+    }))
+  }
+
+  const handleLoginBrandingSave = async () => {
+    if (!settings) {
+      return
+    }
+
+    try {
+      setLoginBrandingSaving(true)
+      const result = await updateLoginBrandingSettings(settings)
+      if (result.success) {
+        addToast({ type: 'success', message: result.message || '登录品牌设置保存成功' })
+      } else {
+        addToast({ type: 'error', message: result.message || '登录品牌设置保存失败' })
+      }
+    } catch (error) {
+      addToast({ type: 'error', message: getApiErrorMessage(error, '登录品牌设置保存失败') })
+    } finally {
+      setLoginBrandingSaving(false)
+    }
+  }
+
+
+
+  const handleThemeAppearanceChange = (key: keyof ThemeAppearanceSettings, value: ThemeEffect | ThemeColorPreset) => {
+    setSettings((current) => {
+      const nextSettings = {
+        ...(current ?? {}),
+        [key]: value,
+      }
+      applyThemeSettings(nextSettings)
+      return nextSettings
+    })
+  }
+
+  const handleThemeAppearanceSave = async () => {
+    if (!settings) {
+      return
+    }
+
+    try {
+      setThemeAppearanceSaving(true)
+      const result = await updateThemeAppearanceSettings(settings)
+      if (result.success) {
+        addToast({ type: 'success', message: result.message || '主题外观保存成功' })
+      } else {
+        addToast({ type: 'error', message: result.message || '主题外观保存失败' })
+      }
+    } catch (error) {
+      addToast({ type: 'error', message: getApiErrorMessage(error, '主题外观保存失败') })
+    } finally {
+      setThemeAppearanceSaving(false)
+    }
+  }
+
+  const handleThemeFontChange = (key: keyof ThemeFontSettings, value: ThemeFontFamily) => {
+    setSettings((current) => {
+      const nextSettings = {
+        ...(current ?? {}),
+        [key]: value,
+      }
+      applyThemeSettings(nextSettings)
+      return nextSettings
+    })
+  }
+
+  const handleThemeFontSave = async () => {
+    if (!settings) {
+      return
+    }
+
+    try {
+      setThemeFontSaving(true)
+      const result = await updateThemeFontSettings(settings)
+      if (result.success) {
+        addToast({ type: 'success', message: result.message || '主题字体保存成功' })
+      } else {
+        addToast({ type: 'error', message: result.message || '主题字体保存失败' })
+      }
+    } catch (error) {
+      addToast({ type: 'error', message: getApiErrorMessage(error, '主题字体保存失败') })
+    } finally {
+      setThemeFontSaving(false)
+    }
+  }
+
+  const handleDisclaimerChange = (key: keyof DisclaimerSettings, value: string) => {
+    setSettings((current) => ({
+      ...(current ?? {}),
+      [key]: value,
+    }))
+  }
+
+  const handleDisclaimerSave = async () => {
+    if (!settings) {
+      return
+    }
+
+    try {
+      setDisclaimerSaving(true)
+      const result = await updateDisclaimerSettings(settings)
+      if (result.success) {
+        addToast({ type: 'success', message: result.message || '免责声明保存成功' })
+      } else {
+        addToast({ type: 'error', message: result.message || '免责声明保存失败' })
+      }
+    } catch (error) {
+      addToast({ type: 'error', message: getApiErrorMessage(error, '免责声明保存失败') })
+    } finally {
+      setDisclaimerSaving(false)
+    }
+  }
+
+  // 代理设置独立保存：只 PUT proxy.api_url / proxy.enabled 两个键
+  // 不使用页面右上角"保存设置"按钮，避免影响其他未改动的设置
+  const handleProxySave = async () => {
+    if (!settings) {
+      return
+    }
+
+    // 业务校验：开启代理前必须先填写代理 API 的 URL
+    // 用 trim 判断仅空白字符的输入也当作"未配置"，否则开启后调用方拿到无效 URL
+    const apiUrl = ((settings['proxy.api_url'] as string) || '').trim()
+    const enabled = Boolean(settings['proxy.enabled'])
+    if (enabled && !apiUrl) {
+      addToast({ type: 'error', message: '开启代理前请先填写代理 API 的 URL' })
+      return
+    }
+
+    try {
+      setProxySaving(true)
+      const result = await updateProxySettings(settings)
+      if (result.success) {
+        addToast({ type: 'success', message: result.message || '代理设置保存成功' })
+      } else {
+        addToast({ type: 'error', message: result.message || '代理设置保存失败' })
+      }
+    } catch (error) {
+      addToast({ type: 'error', message: getApiErrorMessage(error, '代理设置保存失败') })
+    } finally {
+      setProxySaving(false)
+    }
+  }
+
+
+
+  const handleTestEmail = useCallback(async () => {
+    if (!testEmail) {
+      addToast({ type: 'warning', message: '请输入测试邮箱地址' })
+      return
+    }
+    try {
+      setSendingTestEmail(true)
+      const result = await testEmailSend(testEmail)
+      if (result.success) {
+        addToast({ type: 'success', message: '测试邮件发送成功' })
+        setShowTestEmailModal(false)
+        setTestEmail('')
+      } else {
+        addToast({ type: 'error', message: result.message || '发送测试邮件失败' })
+      }
+    } catch (error) {
+      addToast({ type: 'error', message: getApiErrorMessage(error, '发送测试邮件失败') })
+    } finally {
+      setSendingTestEmail(false)
+    }
+  }, [testEmail, addToast])
+
+  const handleHiddenMenusChange = async (keys: string[]) => {
+    if (!settings || hiddenMenuSaving) {
+      return
+    }
+
+    const previousKeys = getHiddenMenuKeysFromSettings(settings)
+    const hiddenMenuPayload = buildHiddenMenuSettingsPayload(keys)
+    const nextSettings = {
+      ...settings,
+      ...hiddenMenuPayload,
+    }
+
+    setSettings(nextSettings)
+    setHiddenMenuKeys(keys)
+
+    try {
+      setHiddenMenuSaving(true)
+      const result = await updateSystemSettings(hiddenMenuPayload)
+      if (!result.success) {
+        throw new Error(result.message || '隐藏菜单设置保存失败')
+      }
+    } catch (error) {
+      const rollbackPayload = buildHiddenMenuSettingsPayload(previousKeys)
+      setSettings((current) => current ? { ...current, ...rollbackPayload } : current)
+      setHiddenMenuKeys(previousKeys)
+      addToast({
+        type: 'error',
+        message: getApiErrorMessage(error, '隐藏菜单设置保存失败'),
+      })
+    } finally {
+      setHiddenMenuSaving(false)
+    }
+  }
+
+  // 上传微信群二维码
+
+  // 上传QQ群二维码
+
+  // 上传微信公众号二维码
+
+  // 上传TG二维码
+
+  // 上传赞赏码
+
+  if (!user?.is_admin) {
+    return <Navigate to="/dashboard" replace />
+  }
+
+  if (loading) {
+    return <PageLoading />
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Header */}
+      <div className="page-header flex-between flex-wrap gap-4">
+        <div>
+          <h1 className="page-title">系统设置</h1>
+          <p className="page-description">配置系统全局设置</p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={loadSettings} className="btn-ios-secondary">
+            <RefreshCw className="w-4 h-4" />
+            刷新
+          </button>
+          <button onClick={handleSave} disabled={saving} className="btn-ios-primary">
+            {saving ? <ButtonLoading /> : <Save className="w-4 h-4" />}
+            保存设置
+          </button>
+        </div>
+      </div>
+
+      {/* 服务管理：消息服务 / 后端服务 / 定时任务服务 重启（仅管理员可见，置于最上方） */}
+      {user?.is_admin && <ServiceRestartCard />}
+
+      {/* 基础设置 + SMTP邮件配置（仅管理员可见） */}
+      {user?.is_admin && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* 基础设置 */}
+          <div className="vben-card">
+            <div className="vben-card-header">
+              <h2 className="vben-card-title">
+                <SettingsIcon className="w-4 h-4" />
+                基础设置
+              </h2>
+            </div>
+            <div className="vben-card-body space-y-4">
+              <div className="flex items-center justify-between py-3 border-b border-slate-100 dark:border-slate-700">
+                <div>
+                  <p className="font-medium text-slate-900 dark:text-slate-100">允许用户注册</p>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">开启后允许新用户注册账号</p>
+                </div>
+                <label className="switch-ios">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings?.registration_enabled ?? false)}
+                    onChange={(e) => setSettings(s => s ? { ...s, registration_enabled: e.target.checked } : null)}
+                  />
+                  <span className="switch-slider"></span>
+                </label>
+              </div>
+              <div className="flex items-center justify-between py-3">
+                <div>
+                  <p className="font-medium text-slate-900 dark:text-slate-100">显示默认登录信息</p>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">登录页面显示默认账号密码提示</p>
+                </div>
+                <label className="switch-ios">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings?.show_default_login_info ?? false)}
+                    onChange={(e) => setSettings(s => s ? { ...s, show_default_login_info: e.target.checked } : null)}
+                  />
+                  <span className="switch-slider"></span>
+                </label>
+              </div>
+              <div className="flex items-center justify-between py-3 border-t border-slate-100 dark:border-slate-700">
+                <div>
+                  <p className="font-medium text-slate-900 dark:text-slate-100">登录滑动验证码</p>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">开启后账号密码登录需要完成滑动验证</p>
+                </div>
+                <label className="switch-ios">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings?.login_captcha_enabled ?? true)}
+                    onChange={(e) => setSettings(s => s ? { ...s, login_captcha_enabled: e.target.checked } : null)}
+                  />
+                  <span className="switch-slider"></span>
+                </label>
+              </div>
+              <div className="flex items-center justify-between py-3 border-t border-slate-100 dark:border-slate-700">
+                <div>
+                  <p className="font-medium text-slate-900 dark:text-slate-100">日志保留天数</p>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">所有模块日志保留天数，修改后实时生效（1~365天）</p>
+                </div>
+                <input
+                  type="number"
+                  min={1}
+                  max={365}
+                  value={settings?.['log.retention_days'] || '7'}
+                  onChange={(e) => {
+                    const val = e.target.value
+                    if (val === '' || /^\d+$/.test(val)) {
+                      setSettings(s => s ? { ...s, 'log.retention_days': val } : null)
+                    }
+                  }}
+                  className="input-ios w-24 text-center"
+                />
+              </div>
+              <div className="flex items-center justify-between py-3 border-t border-slate-100 dark:border-slate-700">
+                <div>
+                  <p className="font-medium text-slate-900 dark:text-slate-100">人脸验证超时自动禁用</p>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">关闭后人脸验证超时不会自动禁用账号</p>
+                </div>
+                <label className="switch-ios">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings?.['account.face_verify_timeout_disable'] ?? true)}
+                    onChange={(e) => setSettings(s => s ? { ...s, 'account.face_verify_timeout_disable': e.target.checked } : null)}
+                  />
+                  <span className="switch-slider"></span>
+                </label>
+              </div>
+              <PasswordLoginModeSetting
+                value={settings?.['password_login.mode']}
+                remoteUrl={settings?.['password_login.remote_url']}
+                remoteSecretKey={settings?.['password_login.remote_secret_key']}
+                onSaved={(mode, remoteUrl, remoteSecretKey) => setSettings((current) => (
+                  current
+                    ? {
+                        ...current,
+                        'password_login.mode': mode,
+                        'password_login.remote_url': remoteUrl ?? String(current['password_login.remote_url'] || ''),
+                        'password_login.remote_secret_key': remoteSecretKey ?? String(current['password_login.remote_secret_key'] || ''),
+                      }
+                    : current
+                ))}
+              />
+              <SliderModeSetting
+                value={settings?.['captcha.slider_mode']}
+                onSaved={(mode) => setSettings((current) => (
+                  current ? { ...current, 'captcha.slider_mode': mode } : current
+                ))}
+              />
+              <TokenApiModeSetting
+                value={settings?.['token.api_mode']}
+                remoteUrl={settings?.['token.remote_url']}
+                remoteSecretKey={settings?.['token.remote_secret_key']}
+                onSaved={(mode, remoteUrl, remoteSecretKey) => setSettings((current) => (
+                  current
+                    ? {
+                        ...current,
+                        'token.api_mode': mode,
+                        'token.remote_url': remoteUrl ?? String(current['token.remote_url'] || ''),
+                        'token.remote_secret_key': remoteSecretKey ?? String(current['token.remote_secret_key'] || ''),
+                      }
+                    : current
+                ))}
+              />
+            </div>
+          </div>
+          {/* SMTP邮件配置 */}
+          <div className="vben-card">
+            <div className="vben-card-header">
+              <h2 className="vben-card-title">
+                <Mail className="w-4 h-4" />
+                SMTP邮件配置
+              </h2>
+            </div>
+            <div className="vben-card-body space-y-4">
+              <p className="text-sm text-slate-500 dark:text-slate-400">配置SMTP服务器用于发送注册验证码等邮件通知</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="input-group">
+                  <label className="input-label">SMTP服务器</label>
+                  <input
+                    type="text"
+                    value={settings?.smtp_server || ''}
+                    onChange={(e) => setSettings(s => s ? { ...s, smtp_server: e.target.value } : null)}
+                    placeholder="smtp.qq.com"
+                    className="input-ios"
+                  />
+                </div>
+                <div className="input-group">
+                  <label className="input-label">SMTP端口</label>
+                  <input
+                    type="number"
+                    value={settings?.smtp_port || 587}
+                    onChange={(e) => setSettings(s => s ? { ...s, smtp_port: parseInt(e.target.value) } : null)}
+                    placeholder="587"
+                    className="input-ios"
+                  />
+                </div>
+                <div className="input-group">
+                  <label className="input-label">发件邮箱</label>
+                  <input
+                    type="email"
+                    value={settings?.smtp_user || ''}
+                    onChange={(e) => setSettings(s => s ? { ...s, smtp_user: e.target.value } : null)}
+                    placeholder="your-email@qq.com"
+                    className="input-ios"
+                  />
+                </div>
+                <div className="input-group">
+                  <label className="input-label">邮箱密码/授权码</label>
+                  <div className="relative">
+                    <input
+                      type={showSmtpPassword ? 'text' : 'password'}
+                      value={settings?.smtp_password || ''}
+                      onChange={(e) => setSettings(s => s ? { ...s, smtp_password: e.target.value } : null)}
+                      placeholder="输入密码或授权码"
+                      className="input-ios pr-20"
+                    />
+                    <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setShowSmtpPassword(!showSmtpPassword)}
+                        className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
+                        title={showSmtpPassword ? '隐藏' : '显示'}
+                      >
+                        {showSmtpPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          // 先校验是否有内容可复制，避免误操作
+                          if (!settings?.smtp_password) {
+                            addToast({ type: 'warning', message: '密码为空，无内容可复制' })
+                            return
+                          }
+                          // 使用 copyToClipboard 工具：自动 fallback execCommand，
+                          // 兼容 HTTP 部署（非 secure context）以及 navigator.clipboard 不可用的场景。
+                          // 旧实现直接 navigator.clipboard.writeText 且未捕获 Promise，
+                          // 在 HTTP 环境下会静默失败但 toast 仍显示成功，误导用户。
+                          const ok = await copyToClipboard(settings.smtp_password)
+                          if (ok) {
+                            addToast({ type: 'success', message: '已复制到剪贴板' })
+                          } else {
+                            addToast({ type: 'error', message: '复制失败，请手动选择文本复制' })
+                          }
+                        }}
+                        className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
+                        title="复制"
+                      >
+                        <Copy className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div className="input-group">
+                  <label className="input-label">发件人显示名（可选）</label>
+                  <input
+                    type="text"
+                    value={settings?.smtp_from || ''}
+                    onChange={(e) => setSettings(s => s ? { ...s, smtp_from: e.target.value } : null)}
+                    placeholder="鱼太咸"
+                    className="input-ios"
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-slate-400">端口说明：25-无加密，465-SSL，587-TLS（推荐）</p>
+              <button onClick={() => setShowTestEmailModal(true)} className="btn-ios-secondary">
+                发送测试邮件
+              </button>
+            </div>
+          </div>
+
+
+        </div>
+      )}
+
+      {user?.is_admin && (
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+          <ThemeAppearanceSettingsCard
+            settings={themeAppearanceSettings}
+            saving={themeAppearanceSaving}
+            onChange={handleThemeAppearanceChange}
+            onSave={handleThemeAppearanceSave}
+          />
+          <ThemeFontSettingsCard
+            settings={themeFontSettings}
+            saving={themeFontSaving}
+            onChange={handleThemeFontChange}
+            onSave={handleThemeFontSave}
+          />
+        </div>
+      )}
+
+      {user?.is_admin && (
+        <LoginBrandingSettingsCard
+          settings={loginBrandingSettings}
+          saving={loginBrandingSaving}
+          onChange={handleLoginBrandingChange}
+          onSave={handleLoginBrandingSave}
+        />
+      )}
+
+      {user?.is_admin && null}
+
+      {user?.is_admin && (
+        <DisclaimerSettingsCard
+          settings={disclaimerSettings}
+          saving={disclaimerSaving}
+          onChange={handleDisclaimerChange}
+          onSave={handleDisclaimerSave}
+        />
+      )}
+
+      {user?.is_admin && (
+        <MenuVisibilitySettings
+          hiddenMenuKeys={getHiddenMenuKeysFromSettings(settings)}
+          onChange={handleHiddenMenusChange}
+          excludedMenuKeys={getExeForcedHiddenMenuKeys(isExeMode)}
+          saving={hiddenMenuSaving}
+        />
+      )}
+
+      {/* 代理设置（仅管理员可见） */}
+      {user?.is_admin && (
+        <div className="grid grid-cols-1 gap-4">
+          <div className="vben-card">
+            <div className="vben-card-header">
+              <h2 className="vben-card-title">
+                <Globe className="w-4 h-4" />
+                代理设置
+              </h2>
+            </div>
+            <div className="vben-card-body space-y-4">
+              <p className="text-sm text-slate-500 dark:text-slate-400">配置网络请求的代理 API，启用后系统会通过该代理转发请求</p>
+              <div className="flex items-center justify-between py-3 border-b border-slate-100 dark:border-slate-700">
+                <div>
+                  <p className="font-medium text-slate-900 dark:text-slate-100">启用代理</p>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">开启后系统将通过下方配置的代理 API 转发网络请求</p>
+                </div>
+                <label className="switch-ios">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings?.['proxy.enabled'] ?? false)}
+                    onChange={(e) => setSettings(s => s ? { ...s, 'proxy.enabled': e.target.checked } : null)}
+                  />
+                  <span className="switch-slider"></span>
+                </label>
+              </div>
+              <div className="input-group">
+                <label className="input-label">代理 API 的 URL</label>
+                {/* 用 textarea 支持长 URL（包含较多查询参数时单行 input 显示不全） */}
+                <textarea
+                  value={(settings?.['proxy.api_url'] as string) || ''}
+                  onChange={(e) => setSettings(s => s ? { ...s, 'proxy.api_url': e.target.value } : null)}
+                  placeholder="请输入代理 API 的 URL，例如：https://example.com/proxy?token=xxx&region=cn"
+                  className="input-ios min-h-[72px] resize-y break-all"
+                />
+                <p className="text-xs text-slate-400 mt-1">代理 API 的完整地址，支持长链接</p>
+              </div>
+              {/* 独立保存按钮：只提交代理两项设置，不影响页面其他未改动字段 */}
+              <div className="flex justify-end pt-2">
+                <button
+                  onClick={handleProxySave}
+                  disabled={proxySaving}
+                  className="btn-ios-primary"
+                >
+                  {proxySaving ? <ButtonLoading /> : <Save className="w-4 h-4" />}
+                  保存代理设置
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 测试邮件弹窗 */}
+      {showTestEmailModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-slate-800 rounded-xl p-6 w-full max-w-md mx-4 shadow-xl">
+            <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-4">发送测试邮件</h3>
+            <div className="input-group mb-4">
+              <label className="input-label">测试邮箱地址</label>
+              <input
+                type="email"
+                value={testEmail}
+                onChange={(e) => setTestEmail(e.target.value)}
+                placeholder="请输入接收测试邮件的邮箱"
+                className="input-ios"
+                autoFocus
+              />
+            </div>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => {
+                  setShowTestEmailModal(false)
+                  setTestEmail('')
+                }}
+                className="btn-ios-secondary"
+                disabled={sendingTestEmail}
+              >
+                取消
+              </button>
+              <button
+                onClick={handleTestEmail}
+                disabled={sendingTestEmail}
+                className="btn-ios-primary"
+              >
+                {sendingTestEmail ? <ButtonLoading /> : <Mail className="w-4 h-4" />}
+                发送
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  )
+}

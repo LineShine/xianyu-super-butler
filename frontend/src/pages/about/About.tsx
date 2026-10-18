@@ -1,0 +1,1 @@
+export function About() { return <div className="card p-8 space-y-4"><h1 className="text-2xl font-extrabold">鱼太咸</h1><p>闲鱼卖家自动托管助手 · 1.0.0</p><p className="text-gray-500">账号、商品、消息与订单，在一处管理。</p><p>采用本机 MySQL、Redis 和独立后台服务。运行资料保存在本机。</p><a className="underline" href="/licenses.txt" target="_blank" rel="noreferrer">开源许可证</a></div> }
