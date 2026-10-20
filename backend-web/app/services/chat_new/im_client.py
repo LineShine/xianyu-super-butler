@@ -718,6 +718,8 @@ class GoofishImClient:
                 timeout_seconds=REQUEST_TIMEOUT,
                 log_tag=self.account_id,
             )
+            if api_result.manual_verification_pending:
+                raise RuntimeError("闲鱼要求手动验证，请在风控日志弹窗中完成；该账号已暂停")
             if api_result.device_id and api_result.device_id != self.device_id:
                 self.device_id = api_result.device_id
                 logger.info(f"【{self.account_id}】已更新远程接口返回的Device ID")

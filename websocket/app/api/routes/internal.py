@@ -190,6 +190,9 @@ async def start_account(account_id: str, request: StartAccountRequest = None):
         操作结果
     """
     try:
+        from common.services.slider_retry_guard import account_slider_paused, SLIDER_PAUSE_REASON
+        if await account_slider_paused(account_id):
+            return {"success": False, "code": 409, "message": SLIDER_PAUSE_REASON, "data": None}
         from app.services.xianyu.cookie_manager import get_manager
         from loguru import logger
         
@@ -419,6 +422,20 @@ async def solve_captcha(request: SolveCaptchaRequest):
     timeout = max(20, min(int(request.browser_timeout or 40), 120))
     call_type = (request.call_type or "remote").strip() or "remote"
     call_user = (request.call_user or "").strip() or None
+    if call_type == "local":
+        from common.services.manual_verification_queue import enqueue
+        log_id = await enqueue(raw_id, url=url, device_id=request.device_id or "")
+        return {
+            "success": False, "code": 202,
+            "message": "已转入手动验证队列，请在 Web 风控日志完成验证",
+            "data": {"manual_verification_pending": True, "risk_log_id": log_id},
+        }
+    from common.services.slider_retry_guard import account_slider_paused, SLIDER_PAUSE_REASON
+    if call_type == "local" and await account_slider_paused(raw_id):
+        return {
+            "success": False, "code": 409, "message": SLIDER_PAUSE_REASON,
+            "data": {"account_paused": True},
+        }
     existing_cookies_str = (request.cookies or "").strip()
     device_id = (request.device_id or "").strip()
     refetched_token_result: dict[str, object] = {}

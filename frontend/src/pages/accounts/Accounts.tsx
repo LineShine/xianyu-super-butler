@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { ACCOUNT_RISK_UPDATED } from '@/components/layout/AccountRiskBanner'
 import { Plus, RefreshCw, QrCode, Key, Edit2, Trash2, Power, PowerOff, X, Loader2, Clock, CheckCircle, MessageSquare, Bot, Globe, Timer, ScanFace, ChevronLeft, ChevronRight, ChevronDown, ImagePlus, Filter, Repeat, MoreHorizontal, PackageCheck, Star, ShieldCheck, Flower2, Eye, EyeOff, Ban, Download, Upload, Send, Ticket, AlertCircle, Truck } from 'lucide-react'
 import { getAccountDetailsPaginated, deleteAccount, updateAccountCookie, updateAccountStatus, updateAccountsStatusBatch, closeAccountsNoticeBatch, clearTokenCacheBatch, updateAccountRemark, addAccount, generateQRLogin, checkQRLoginStatus, passwordLogin, checkPasswordLoginStatus, cancelPasswordLogin, updateAccountAutoConfirm, updateAccountPauseDuration, updateAccountMessageExpireTime, updateAccountReplyDelay, updateAccountLoginInfo, updateAccountScheduledRedelivery, updateAccountScheduledRate, updateAccountAutoPolish, updateAccountConfirmBeforeSend, updateAccountSendBeforeConfirm, updateAccountOnlySendCard, updateAccountAutoRedFlower, updateAccountAiReplyBlockOrderedUsers, getAIReplySettings, updateAIReplySettings, testAIConnection, fetchAIModels, AI_PROVIDER_OPTIONS, AI_PROVIDER_DEFAULT_BASE_URLS, getProxyConfig, updateProxyConfig, getFaceVerificationScreenshot, deleteFaceVerificationScreenshot, getConfirmReceiptMessage, updateConfirmReceiptMessage, uploadConfirmReceiptImage, exportAccountsExcel, importAccountsExcel, type AIProviderType, type AIModelOption, type ProxyConfig, type FaceVerificationScreenshot, type AccountFilterParams } from '@/api/accounts'
 import { getDefaultReply, updateDefaultReply, uploadDefaultReplyImage } from '@/api/keywords'
@@ -95,6 +96,8 @@ export function Accounts() {
   const { isAuthenticated, token, user, _hasHydrated } = useAuthStore()
   const { isExeMode } = useMenuVisibilityStore()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const linkedAccountId = searchParams.get('account_id') || ''
   const [loading, setLoading] = useState(true)
   const [accounts, setAccounts] = useState<AccountWithKeywordCount[]>([])
   const [activeModal, setActiveModal] = useState<ModalType>(null)
@@ -442,8 +445,12 @@ export function Accounts() {
 
   useEffect(() => {
     if (!_hasHydrated || !isAuthenticated || !token) return
-    loadAccounts()
-  }, [_hasHydrated, isAuthenticated, token])
+    const linkedFilters = { ...filters, account_id: linkedAccountId || null }
+    setFilters(linkedFilters)
+    setAccountIdInput(linkedAccountId)
+    if (linkedAccountId) setShowFilters(true)
+    loadAccounts(1, pagination.pageSize, linkedFilters)
+  }, [_hasHydrated, isAuthenticated, token, linkedAccountId])
 
   // 清理扫码检查定时器
   const clearQrCheck = useCallback(() => {
@@ -835,6 +842,7 @@ export function Accounts() {
         return
       }
       addToast({ type: 'success', message: account.enabled ? '账号已禁用' : '账号已启用' })
+      window.dispatchEvent(new Event(ACCOUNT_RISK_UPDATED))
       await loadAccounts()
     } catch (error) {
       addToast({ type: 'error', message: getApiErrorMessage(error, '操作失败') })
@@ -2084,9 +2092,9 @@ export function Accounts() {
       </div>
 
       {/* Accounts List */}
-      <div className="vben-card flex flex-col" style={{ height: 'calc(100vh - 280px)', minHeight: '400px' }}>
+      <div className="vben-card flex flex-col">
         <div className="vben-card-header flex-shrink-0">
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
             <h2 className="vben-card-title">账号列表</h2>
             <span className="badge-primary">{pagination.total} 个账号</span>
           </div>
@@ -2159,6 +2167,8 @@ export function Accounts() {
             </button>
             <button
               onClick={() => setShowFilters(!showFilters)}
+              aria-expanded={showFilters}
+              aria-controls="account-list-filters"
               className={`btn-ios-secondary btn-sm flex items-center gap-1 ${hasActiveFilters ? 'text-blue-600 border-blue-300' : ''}`}
             >
               <Filter className="w-4 h-4" />
@@ -2175,7 +2185,7 @@ export function Accounts() {
         
         {/* 筛选区域 */}
         {showFilters && (
-          <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
+          <div id="account-list-filters" className="shrink-0 px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
               {/* 状态筛选 */}
               <div className="flex flex-col gap-1">
@@ -2373,14 +2383,15 @@ export function Accounts() {
             </div>
           </div>
         )}
-        <div className="flex-1 overflow-x-auto overflow-y-auto scrollbar-visible">
+        {/* Let every row contribute its natural height; only columns scroll internally. */}
+        <div className="w-full shrink-0 overflow-x-auto scrollbar-visible">
           {accountsLoading ? (
             <div className="flex justify-center py-8">
               <RefreshCw className="w-6 h-6 animate-spin text-blue-500" />
             </div>
           ) : (
             <table className="table-ios" style={{ minWidth: 'max-content' }}>
-              <thead className="sticky top-0 bg-white dark:bg-slate-800 z-10">
+              <thead className="bg-white dark:bg-slate-800">
                 <tr>
                   <th className="w-10">
                     <input

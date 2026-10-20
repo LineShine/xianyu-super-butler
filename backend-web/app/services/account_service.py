@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from urllib.parse import unquote
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,9 +19,27 @@ from common.services.account_limit_service import AccountLimitService
 from common.models.ytx_account import YtxAccount
 from common.models.user import User
 from common.utils.cookie_refresh import clear_cookie_refresh_snapshot
+from common.utils.xianyu_utils import trans_cookies
 
 # UTC时区常量
 UTC = timezone.utc
+
+
+def _qr_login_nickname(cookies: str, unb: str | None) -> str | None:
+    """Read the username supplied by login without an extra platform request."""
+    raw_name = trans_cookies(cookies).get("tracknick", "") if cookies else ""
+    try:
+        nickname = unquote(raw_name, errors="strict").strip()
+    except UnicodeDecodeError:
+        return None
+    if (
+        not nickname
+        or nickname == unb
+        or nickname.lower() in {"undefined", "null"}
+        or any(ord(char) < 32 or ord(char) == 127 for char in nickname)
+    ):
+        return None
+    return nickname[:120]
 
 
 class AccountService:
@@ -371,6 +390,9 @@ class AccountService:
             enabled: 是否启用
             disable_reason: 禁用原因（仅在禁用时有效，启用时会清空）
         """
+        if enabled:
+            from common.services.slider_retry_guard import reset_slider_guard
+            await reset_slider_guard(self.session, account)
         account.status = "active" if enabled else "disabled"
         # 启用时清空禁用原因，禁用时设置禁用原因
         account.disable_reason = None if enabled else disable_reason
@@ -478,6 +500,8 @@ class AccountService:
 
         created = False
         if account:
+            from common.services.slider_retry_guard import reset_slider_guard
+            await reset_slider_guard(self.session, account)
             account.cookie = cookies
             account.metadata_json = clear_cookie_refresh_snapshot(account.metadata_json)
             account.status = "active"
@@ -507,6 +531,14 @@ class AccountService:
             )
             self.session.add(account)
             created = True
+
+        # Both normal and shared QR login reach here. Fill only empty fields so
+        # a later scan never overwrites a user remark or a resolved fish nickname.
+        nickname = _qr_login_nickname(cookies, unb)
+        if not (account.display_name or "").strip() and nickname:
+            account.display_name = nickname
+        if not (account.remark or "").strip():
+            account.remark = (account.display_name or "").strip() or None
 
         self.session.add(account)
         await self.session.commit()
@@ -550,6 +582,8 @@ class AccountService:
         now = datetime.now(tz=UTC)
         created = False
         if existing:
+            from common.services.slider_retry_guard import reset_slider_guard
+            await reset_slider_guard(self.session, existing)
             existing.cookie = cookies
             existing.metadata_json = clear_cookie_refresh_snapshot(existing.metadata_json)
             existing.username = account

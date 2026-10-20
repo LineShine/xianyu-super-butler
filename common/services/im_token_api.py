@@ -70,6 +70,7 @@ class ImTokenApiResult:
     # 远程接口失败时的原因文本。独立字段承载，不写入 response_json 的 ret / data，
     # 避免污染滑块关键词与令牌过期的子串判断，也不覆盖响应里的滑块验证链接。
     remote_failure_message: str = ""
+    manual_verification_pending: bool = False
 
 
 def extract_im_access_token(response_json: Any) -> str | None:
@@ -404,18 +405,40 @@ async def request_im_token_with_fallback(
         aiohttp.ClientError: 网络请求失败。
         asyncio.TimeoutError: 请求超时。
     """
+    from common.services.slider_retry_guard import account_slider_paused, SLIDER_PAUSE_REASON
+    from common.services.manual_verification_queue import enqueue, held, official_challenge
+    from common.services.captcha.token_response import extract_token_captcha_url
+    account_identifier = trans_cookies(cookies_str).get("unb", "")
+    if account_identifier and await held(account_identifier):
+        return ImTokenApiResult(
+            response_json={"ret": ["MANUAL_VERIFICATION_PENDING::等待手动验证"]},
+            response_cookies={}, status_code=202, duration_seconds=0,
+            manual_verification_pending=True,
+        )
+    if account_identifier and await account_slider_paused(account_identifier):
+        raise RuntimeError(SLIDER_PAUSE_REASON)
     configured_mode = normalize_token_api_mode(api_mode)
     if configured_mode == TOKEN_API_MODE_REMOTE:
-        return await _request_remote_token_from_settings(
+        result = await _request_remote_token_from_settings(
             device_id,
             cookies=cookies_str,
             timeout_seconds=timeout_seconds,
             log_tag=log_tag,
         )
 
-    return await request_im_token(
-        cookies_str,
-        device_id,
-        api_mode=TOKEN_API_MODE_WEB,
-        timeout_seconds=timeout_seconds,
-    )
+    else:
+        result = await request_im_token(
+            cookies_str, device_id, api_mode=TOKEN_API_MODE_WEB,
+            timeout_seconds=timeout_seconds,
+        )
+    url = extract_token_captcha_url(result.response_json)
+    if account_identifier and official_challenge(url) and not extract_im_access_token(result.response_json):
+        await enqueue(account_identifier, url=url, device_id=result.device_id or device_id,
+                      expected_cookie=cookies_str, response_cookies=result.response_cookies)
+        # Never fall through into an automatic solver after handing off to a human.
+        return ImTokenApiResult(
+            response_json={"ret": ["MANUAL_VERIFICATION_PENDING::已转入手动验证队列"]},
+            response_cookies={}, status_code=202, duration_seconds=result.duration_seconds,
+            api_mode=result.api_mode, manual_verification_pending=True,
+        )
+    return result

@@ -357,6 +357,9 @@ class TokenRenewalTask:
                     )
                     return self._failed_result(candidate, message)
 
+                if result.manual_verification_pending:
+                    return self._failed_result(candidate, "已转入手动验证队列，该账号暂停，其他续期任务继续")
+
                 # 无论成功失败，接口下发的 Cookie（如新 _m_h5_tk）都要合并写回
                 merged_response_cookies = await self._merge_response_cookies(
                     candidate, cookies_str, result.response_cookies

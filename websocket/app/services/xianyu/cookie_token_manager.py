@@ -817,27 +817,6 @@ class CookieTokenManager:
                     # 打印滑块验证返回的全部cookies
                     logger.warning(f"【{self.cookie_id}】滑块验证返回的全部cookies: {cookies}")
                     
-                    # 更新风控日志为成功状态
-                    captcha_duration = time.time() - captcha_start_time
-                    if log_id:
-                        try:
-                            from common.db.compat import db_manager
-                            engine_label_map = {
-                                'drissionpage': '兜底引擎(DrissionPage)',
-                                'real_mouse': '真人鼠标引擎(RealMouse)',
-                                'remote': '远程接口(Remote)',
-                                'playwright': '主引擎(Playwright)',
-                            }
-                            engine_label = engine_label_map.get(captcha_engine, '主引擎(Playwright)')
-                            db_manager.update_risk_control_log(
-                                log_id=log_id,
-                                processing_status='success',
-                                captcha_engine=captcha_engine,
-                                processing_result=f'滑块验证成功（{engine_label}），耗时: {captcha_duration:.2f}秒'
-                            )
-                        except Exception as update_e:
-                            logger.error(f"【{self.cookie_id}】更新风控日志失败: {update_e}")
-
                     # 只提取x5sec相关的cookie值进行更新
                     updated_cookies = self.cookies.copy()
                     new_cookie_count = 0
@@ -855,8 +834,7 @@ class CookieTokenManager:
                     # 浏览器/HTTP 出口 IP 不一致或风控环境异常）。若仍按"成功"返回 cookies_str，
                     # 上层 refresh_token 会认为滑块成功并立即重试 token 刷新，但 cookies 实际未变，
                     # token 接口必然再次返回 FAIL_SYS_USER_VALIDATE → 又触发滑块，形成死循环。
-                    # 这里显式判定失败，让上层走 failed_captcha 分支（不计入禁用计数），
-                    # 避免账号被误累加 _token_fetch_failures 直至 10 次自动禁用。
+                    # 不提前记成功，确保未实际放行的结果计入连续滑块失败保护。
                     if not x5sec_cookies:
                         logger.error(
                             f"【{self.cookie_id}】滑块视觉验证通过但未获取到任何 x5 相关 cookie，"
@@ -877,6 +855,27 @@ class CookieTokenManager:
                             except Exception as update_e:
                                 logger.error(f"【{self.cookie_id}】更新风控日志失败: {update_e}")
                         return None
+
+                    # 更新风控日志为成功状态
+                    captcha_duration = time.time() - captcha_start_time
+                    if log_id:
+                        try:
+                            from common.db.compat import db_manager
+                            engine_label_map = {
+                                'drissionpage': '兜底引擎(DrissionPage)',
+                                'real_mouse': '真人鼠标引擎(RealMouse)',
+                                'remote': '远程接口(Remote)',
+                                'playwright': '主引擎(Playwright)',
+                            }
+                            engine_label = engine_label_map.get(captcha_engine, '主引擎(Playwright)')
+                            db_manager.update_risk_control_log(
+                                log_id=log_id,
+                                processing_status='success',
+                                captcha_engine=captcha_engine,
+                                processing_result=f'滑块验证成功（{engine_label}），耗时: {captcha_duration:.2f}秒'
+                            )
+                        except Exception as update_e:
+                            logger.error(f"【{self.cookie_id}】更新风控日志失败: {update_e}")
 
                     for cookie_name, cookie_value in x5sec_cookies.items():
                         if cookie_name in updated_cookies:
@@ -1094,10 +1093,19 @@ class CookieTokenManager:
         account_identifier = self.myid or self.cookie_id
         try:
             async with token_request_lock(account_identifier):
-                return await self._refresh_token_with_lock(
+                token = await self._refresh_token_with_lock(
                     captcha_retry_count,
                     token_expiry_retry_count,
                 )
+                from common.services.slider_retry_guard import account_slider_paused
+                if await account_slider_paused(self.cookie_id):
+                    self.current_token = None
+                    self.last_token_refresh_status = "paused_slider_failures"
+                    ws = self.parent.connection_manager.ws
+                    if ws is not None:
+                        await ws.close()
+                    return None
+                return token
         except TokenRequestLockError as exc:
             logger.error(f"【{self.cookie_id}】{exc}")
             self.current_token = None
@@ -1122,6 +1130,11 @@ class CookieTokenManager:
         notification_sent = False
         
         try:
+            from common.services.slider_retry_guard import account_slider_paused
+            if await account_slider_paused(self.cookie_id):
+                self.current_token = None
+                self.last_token_refresh_status = "paused_slider_failures"
+                return None
             # 检查账号是否已禁用
             from app.services.captcha.concurrency import should_skip_account
             if should_skip_account(self.cookie_id):
@@ -1261,6 +1274,13 @@ class CookieTokenManager:
                 api_mode=token_api_mode,
                 log_tag=self.cookie_id,
             )
+            if api_result.manual_verification_pending:
+                self.current_token = None
+                self.last_token_refresh_status = "skipped_manual_verification"
+                ws = self.parent.connection_manager.ws
+                if ws is not None:
+                    await ws.close()
+                return None
             if api_result.device_id and api_result.device_id != self.device_id:
                 self.device_id = api_result.device_id
                 logger.info(f"【{self.cookie_id}】已更新远程接口返回的Device ID")

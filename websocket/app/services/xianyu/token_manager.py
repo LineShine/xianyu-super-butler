@@ -134,6 +134,9 @@ class TokenManager:
                 if new_token:
                     self.last_cookie_refresh_time = current_time
                     logger.info(f"【{self.cookie_id}】Cookie刷新任务完成,Token已更新")
+                elif getattr(self.xianyu, "last_token_refresh_status", "") in ("paused_slider_failures", "skipped_manual_verification"):
+                    self.cookie_refresh_enabled = False
+                    logger.warning(f"【{self.cookie_id}】滑块验证失败已暂停，停止Cookie刷新")
                 elif getattr(self.xianyu, "last_token_refresh_status", "") in (
                     "skipped_local_slider_disabled",
                     "skipped_local_slider_config_unavailable",

@@ -145,6 +145,10 @@ class CookiesRefreshTaskService:
         account: YtxAccount,
     ) -> None:
         """禁用账号续期成功后自动启用，并通知WebSocket服务启动任务。"""
+        from common.services.slider_retry_guard import is_slider_paused
+        await session.refresh(account, with_for_update=True)
+        if is_slider_paused(account):
+            return
         old_status = account.status
         account.status = "active"
         account.disable_reason = None
@@ -216,6 +220,9 @@ class CookiesRefreshTaskService:
         account: YtxAccount,
     ) -> CookiesRefreshProcessResult:
         """处理单个账号的Cookie续期。"""
+        from common.services.slider_retry_guard import account_slider_paused, is_slider_paused
+        if is_slider_paused(account) or await account_slider_paused(account.account_id):
+            return CookiesRefreshProcessResult(status="skipped", message="滑块失败保护已暂停账号")
         now = get_beijing_now_naive()
         schedule = await self._get_schedule(session, account.account_id)
         if not schedule:
@@ -240,6 +247,10 @@ class CookiesRefreshTaskService:
             return CookiesRefreshProcessResult(status="failed", message="账号Cookie为空，且无完整Cookie快照，无法执行续期")
 
         browser_result = await cookies_refresh_browser_service.refresh_account_cookies(account)
+        # A concurrent slider result may have paused this account while the browser ran.
+        await session.refresh(account, with_for_update=True)
+        if is_slider_paused(account):
+            return CookiesRefreshProcessResult(status="skipped", message="滑块失败保护已暂停账号")
         if not browser_result.success:
             schedule.last_status = "failed"
             schedule.last_error_message = browser_result.message[:500]
@@ -325,6 +336,10 @@ class CookiesRefreshTaskService:
             for account in accounts:
                 is_disabled = self._is_disabled_account(account)
                 try:
+                    from common.services.slider_retry_guard import is_slider_paused
+                    if is_slider_paused(account):
+                        skipped_count += 1
+                        continue
                     # 禁用账号：检查是否连续失败达到阈值
                     if is_disabled:
                         should_skip = await self._check_consecutive_failures(

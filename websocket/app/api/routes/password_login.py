@@ -358,6 +358,8 @@ def _save_login_result(
                     
                     if existing_account:
                         # 更新现有账号
+                        from common.services.slider_retry_guard import reset_slider_guard
+                        await reset_slider_guard(session, existing_account)
                         existing_account.cookie = cookies_str
                         existing_account.metadata_json = clear_cookie_refresh_snapshot(existing_account.metadata_json)
                         existing_account.username = account

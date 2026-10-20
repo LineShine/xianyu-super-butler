@@ -147,9 +147,16 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("已禁用自动启动Goofish定时采集任务（AUTO_START_CRAWL_JOBS=false）")
     
+    from app.services.manual_captcha_service import manual_captcha_manager
+    manual_verification_queue_task = asyncio.create_task(manual_captcha_manager.run_queue())
+
     yield
     
     logger.info(f"{settings.project_name} 关闭中...")
+
+    manual_verification_queue_task.cancel()
+    await asyncio.gather(manual_verification_queue_task, return_exceptions=True)
+    await manual_captcha_manager.shutdown()
     
     # 停止所有在线聊天IM会话
     try:

@@ -515,10 +515,10 @@ class DBManagerCompat:
                     values['error_message'] = kwargs['error_message']
                 if not values:
                     return True
-                stmt = update(YtxRiskControlLog).where(YtxRiskControlLog.id == log_id).values(**values)
-                result = await session.execute(stmt)
+                from common.services.slider_retry_guard import update_slider_log
+                updated = await update_slider_log(session, log_id, values)
                 await session.commit()
-                return result.rowcount > 0
+                return updated
         try:
             return self._run_async(_update)
         except Exception as e:

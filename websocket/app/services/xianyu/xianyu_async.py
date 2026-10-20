@@ -2073,12 +2073,13 @@ class XianyuAsync:
             content_base64 = base64.b64encode(content_json.encode("utf-8")).decode("utf-8")
 
             mid = generate_mid()
+            message_uuid = generate_uuid()
             msg = {
                 "lwp": "/r/MessageSend/sendByReceiverScope",
                 "headers": {"mid": mid},
                 "body": [
                     {
-                        "uuid": generate_uuid(),
+                        "uuid": message_uuid,
                         "cid": f"{chat_id}@goofish",
                         "conversationType": 1,
                         "content": {
@@ -2121,12 +2122,13 @@ class XianyuAsync:
             await self._send_with_echo_tracking(
                 websocket, msg_str, chat_id, content, automatic=automatic
             )
-            logger.info(f"【{self.cookie_id}】发送消息成功: {content[:50]}...")
+            logger.info(f"【{self.cookie_id}】文本消息已写入连接: mid={mid}, uuid={message_uuid}")
             return {
                 "success": True,
                 "mode": "text",
                 "content": content,
                 "mid": registered_mid,
+                "uuid": message_uuid,
                 # 直接携带 Future 引用：即使服务端响应在上层 await 之前到达
                 # （_dispatch_mid_response 已 set_result 并从字典移除），
                 # 持有引用仍能拿到结果，避免漏判拦截
@@ -2842,12 +2844,14 @@ class XianyuAsync:
             
             logger.info(f"【{self.cookie_id}】图片消息内容: {content_json}")
             
+            mid = generate_mid()
+            message_uuid = generate_uuid()
             msg = {
                 "lwp": "/r/MessageSend/sendByReceiverScope",
-                "headers": {"mid": generate_mid()},
+                "headers": {"mid": mid},
                 "body": [
                     {
-                        "uuid": generate_uuid(),
+                        "uuid": message_uuid,
                         "cid": f"{chat_id}@goofish",
                         "conversationType": 1,
                         "content": {
@@ -2873,10 +2877,12 @@ class XianyuAsync:
             logger.debug(f"【{self.cookie_id}】发送图片WebSocket消息: {json.dumps(msg, ensure_ascii=False)[:500]}...")
             
             await self._send_with_echo_tracking(websocket, json.dumps(msg), chat_id, cdn_url)
-            logger.info(f"【{self.cookie_id}】发送图片消息成功: {cdn_url}")
+            logger.info(f"【{self.cookie_id}】图片消息已写入连接: mid={mid}, uuid={message_uuid}")
             return {
                 "success": True,
                 "mode": "image",
+                "mid": mid,
+                "uuid": message_uuid,
                 "image_url": cdn_url,
                 "original_image_url": image_url,
             }
@@ -3045,6 +3051,9 @@ class XianyuAsync:
                             # - 滑块/风控类失败：不计入禁用计数（属于可恢复的风控场景，账号本身不一定有问题）
                             # - 真实故障（网络/超时/API 业务失败/Cookie 失效）：累加计数，达到 10 次禁用
                             refresh_status = getattr(self, 'last_token_refresh_status', '') or ''
+                            if refresh_status == 'paused_slider_failures':
+                                logger.warning(f"【{self.cookie_id}】滑块验证连续失败3次，停止自动连接，等待手动处理")
+                                break
                             # 不计入禁用计数的状态（滑块/风控/冷却）
                             non_counted_statuses = (
                                 'failed_captcha',
@@ -3053,6 +3062,7 @@ class XianyuAsync:
                                 'skipped_cooldown',
                                 'skipped_local_slider_disabled',
                                 'skipped_local_slider_config_unavailable',
+                                'skipped_manual_verification',
                                 'skipped_risk_control_processing',
                                 'skipped_risk_control_check_failed',
                                 'skipped_startup_cache_lookup_failed',
@@ -3099,6 +3109,7 @@ class XianyuAsync:
                             elif refresh_status in (
                                 'skipped_local_slider_disabled',
                                 'skipped_local_slider_config_unavailable',
+                                'skipped_manual_verification',
                                 'skipped_risk_control_processing',
                                 'skipped_risk_control_check_failed',
                                 'skipped_startup_cache_lookup_failed',

@@ -19,12 +19,13 @@ import { useAuthStore } from '@/store/authStore'
 import { PageLoading } from '@/components/common/Loading'
 import { Select } from '@/components/common/Select'
 import { ConfirmModal } from '@/components/common/ConfirmModal'
+import { startManualVerification, MANUAL_VERIFICATION_UPDATED } from '@/api/manualVerification'
 import { getApiErrorMessage } from '@/utils/request'
 import { getBeijingDateInputValue } from '@/utils/date'
 import type { Account } from '@/types'
 
 // Token获取方式专用域名：这些是取Token的远程接口地址，不是过滑块远程服务，禁止填到本页保存
-const TOKEN_API_ONLY_DOMAINS: string[] = []
+const TOKEN_API_ONLY_DOMAINS = ['api.xianyushop.shop', 'api.xianyusite.shop', 'api.zhinianblog.cn']
 
 /** 返回远程服务URL中命中的Token接口域名，未命中返回空字符串 */
 const findTokenApiDomain = (url: string): string => {
@@ -91,6 +92,7 @@ export function RiskLogs() {
   const getCallTypeLabel = (callType?: string | null) => (callType === 'remote' ? '远程' : '本机')
 
   const getProcessingStatusLabel = (log: RiskLog) => {
+    if (log.processing_status === 'queued') return '排队等待'
     if (log.processing_status === 'success') return '成功'
     if (log.processing_status === 'failed') return '失败'
     if (log.processing_status === 'processing') return `处理中（${getCallTypeLabel(log.call_type)}）`
@@ -130,6 +132,12 @@ export function RiskLogs() {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    const refresh = () => { void loadLogs() }
+    window.addEventListener(MANUAL_VERIFICATION_UPDATED, refresh)
+    return () => window.removeEventListener(MANUAL_VERIFICATION_UPDATED, refresh)
+  })
 
   // 加载当日成功率（独立于筛选条件，统计北京时间当天）
   const loadTodayRate = async () => {
@@ -444,8 +452,9 @@ export function RiskLogs() {
           <div className="flex items-start gap-2 mb-4 px-3 py-2.5 rounded-lg bg-blue-50 dark:bg-blue-500/10 border border-blue-100 dark:border-blue-500/20">
             <Info className="w-4 h-4 mt-0.5 shrink-0 text-blue-500 dark:text-blue-400" />
             <div className="text-xs leading-relaxed text-blue-700 dark:text-blue-300 space-y-0.5">
-              <p>可填写自行配置的滑块验证接口地址。</p>
-              <p>密钥由您的接口服务提供方配置。</p>
+              <p>原项目提供的远程过滑块地址：<span className="break-all font-medium">https://xy-api.zhinianboke.com/api/v1/captcha/slider-solve</span>，也支持自行部署的兼容服务。</p>
+              <p>密钥请在 <a href="https://xy.zhinianboke.com" target="_blank" rel="noopener noreferrer" className="font-medium underline underline-offset-2">xy.zhinianboke.com</a> 注册并登录后，到「个人设置」获取。测试返回「punish 链接不能为空」表示地址与密钥校验通过，尚未执行滑块验证。</p>
+              <p>本页用于远程过滑块；远程获取 Token 请到「系统设置 → 基础设置 → Token获取方式」配置，两种接口的地址和密钥不可混用。</p>
             </div>
           </div>
           <div className="flex flex-wrap items-end gap-4">
@@ -455,17 +464,18 @@ export function RiskLogs() {
                 type="text"
                 value={remoteUrl}
                 onChange={(e) => setRemoteUrl(e.target.value)}
-                placeholder="例如：https://your-host/api/v1/captcha/slider-solve"
+                placeholder="https://xy-api.zhinianboke.com/api/v1/captcha/slider-solve"
                 className="input-ios"
               />
             </div>
             <div className="input-group flex-1 min-w-[260px]">
               <label className="input-label">秘钥</label>
               <input
-                type="text"
+                type="password"
                 value={remoteSecret}
                 onChange={(e) => setRemoteSecret(e.target.value)}
-                placeholder="个人设置中的秘钥"
+                autoComplete="new-password"
+                placeholder="服务方网站「个人设置」中的密钥"
                 className="input-ios"
               />
             </div>
@@ -510,7 +520,7 @@ export function RiskLogs() {
             <div className="text-sm">
               <p className="font-medium text-slate-700 dark:text-slate-200">调用远程接口时传递账号 Cookie</p>
               <p className="mt-0.5 text-xs text-amber-600 dark:text-amber-400">
-                默认关闭。传递 Cookie 可进一步提高过滑块成功率（链接过期时远程端可凭此自动重取新链接），远程系统不会保存该值；请仅在信任该远程服务时开启。
+                默认关闭。开启后会向远程服务发送完整 Cookie 和设备标识，用于验证链接过期后重取链接。数据是否保存取决于服务方，请仅在信任该服务时开启。
               </p>
             </div>
           </div>
@@ -851,9 +861,26 @@ export function RiskLogs() {
                       }`}>
                         {getProcessingStatusLabel(log)}
                       </span>
+                      {log.call_type !== 'remote' && ['slider_captcha', 'manual_slider_captcha', 'manual_slider_queue'].includes(log.risk_type) && log.processing_status !== 'success' && (
+                        <button
+                          className="mt-2 block whitespace-nowrap rounded-lg border border-blue-200 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-950/30"
+                          onClick={async () => {
+                            try {
+                              await startManualVerification(log.cookie_id)
+                              window.dispatchEvent(new Event(MANUAL_VERIFICATION_UPDATED))
+                              addToast({ type: 'success', message: '已加入验证队列，轮到时会自动打开' })
+                              void loadLogs()
+                            } catch (error) {
+                              addToast({ type: 'error', message: getApiErrorMessage(error, '加入验证队列失败') })
+                            }
+                          }}
+                        >手动验证</button>
+                      )}
                     </td>
                     <td>
-                      {log.captcha_engine === 'drissionpage' ? (
+                      {log.captcha_engine === 'manual' ? (
+                        <span className="text-xs px-2 py-1 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">手动操作</span>
+                      ) : log.captcha_engine === 'drissionpage' ? (
                         <span className="text-xs px-2 py-1 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">
                           兜底引擎
                         </span>

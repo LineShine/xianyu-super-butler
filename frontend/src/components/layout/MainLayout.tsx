@@ -3,6 +3,8 @@ import { Outlet, useLocation } from 'react-router-dom'
 import { Sidebar } from './Sidebar'
 import { TopNavbar } from './TopNavbar'
 import { TabsBar } from './TabsBar'
+import { AccountRiskBanner } from './AccountRiskBanner'
+import { ManualVerificationQueue } from './ManualVerificationQueue'
 import { Toast } from '@/components/common/Toast'
 import { PageLoading } from '@/components/common/Loading'
 import { getDefaultLoginBrandingSettings, getSystemSettings, LOGIN_BRANDING_UPDATED_EVENT, normalizeLoginBrandingSettings } from '@/api/settings'
@@ -76,6 +78,7 @@ export function MainLayout() {
           
           {/* Tabs bar */}
           <TabsBar />
+          <AccountRiskBanner />
         </div>
         
         {/* Page content */}
@@ -97,6 +100,7 @@ export function MainLayout() {
 
       {/* Toast notifications */}
       <Toast />
+      <ManualVerificationQueue />
 
     </div>
   )

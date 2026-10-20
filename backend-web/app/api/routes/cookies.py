@@ -428,6 +428,8 @@ async def _update_account_status_and_task(
     from app.services.websocket_client import websocket_client
 
     original_disable_reason = account.disable_reason
+    from copy import deepcopy
+    original_metadata = deepcopy(account.metadata_json)
     await account_service.update_status(
         account, enabled, disable_reason="手动禁用" if not enabled else None
     )
@@ -444,6 +446,7 @@ async def _update_account_status_and_task(
         task_message = task_result.get("message")
 
     if not task_success:
+        account.metadata_json = original_metadata
         await account_service.update_status(account, current_enabled, original_disable_reason)
         return False, task_message or ("账号任务启动失败" if enabled else "账号任务停止失败")
 

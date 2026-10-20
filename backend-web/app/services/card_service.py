@@ -287,6 +287,14 @@ class CardService:
         duplicate_msg = await self.check_card_duplicate(user_id=user_id, item_id=new_item_id, name=new_name, is_multi_spec=new_is_multi_spec, spec_name=new_spec_name, spec_value=new_spec_value, exclude_card_id=card_id)
         if duplicate_msg:
             raise ValueError(duplicate_msg)
+        # 图片列表是完整替换；同时更新旧版单图字段，防止删空后回退到旧图。
+        # 未提交任何图片字段时保留原值（例如只切换启用状态）。
+        if 'image_urls' in kwargs:
+            image_urls = kwargs['image_urls'] or []
+            kwargs['image_urls'] = image_urls
+            kwargs['image_url'] = image_urls[0] if image_urls else None
+        elif 'image_url' in kwargs:
+            kwargs['image_urls'] = [kwargs['image_url']] if kwargs['image_url'] else []
         for (key, value) in kwargs.items():
             if hasattr(card, key):
                 if key == 'api_config' and isinstance(value, dict):

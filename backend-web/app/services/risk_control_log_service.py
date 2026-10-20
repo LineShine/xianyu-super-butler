@@ -28,6 +28,35 @@ class RiskControlLogService:
     def __init__(self, session: AsyncSession):
         self.session = session
 
+    async def list_paused_accounts(self, owner_id: int | None) -> list[dict]:
+        from common.services.slider_retry_guard import SLIDER_GUARD_KEY
+        from common.services.manual_verification_queue import HOLD_KEY, QUEUE_KEY
+        stmt = select(
+            YtxAccount.account_id, YtxAccount.display_name, YtxAccount.remark, YtxAccount.metadata_json,
+            YtxAccount.disable_reason,
+        ).where(
+            YtxAccount.status != "deleted",
+            or_(
+                YtxAccount.metadata_json[SLIDER_GUARD_KEY]["paused_at"].as_string().is_not(None),
+                and_(YtxAccount.status == "disabled", YtxAccount.metadata_json[HOLD_KEY].as_boolean() == True),
+            ),
+        ).order_by(YtxAccount.id)
+        if owner_id is not None:
+            stmt = stmt.where(YtxAccount.owner_id == owner_id)
+        rows = (await self.session.execute(stmt)).all()
+        return [
+            {
+                "account_id": row.account_id,
+                "display_name": row.remark or row.display_name or row.account_id,
+                "consecutive_failures": ((row.metadata_json or {}).get(SLIDER_GUARD_KEY) or {}).get("consecutive_failures", 0),
+                "paused_at": ((row.metadata_json or {}).get(SLIDER_GUARD_KEY) or {}).get("paused_at")
+                    or str(((row.metadata_json or {}).get(QUEUE_KEY) or {}).get("requested_at", "")),
+                "issue": row.disable_reason or "闲鱼触发滑块风控，完成手动验证后将自动恢复"
+                    if (row.metadata_json or {}).get(HOLD_KEY) else None,
+            }
+            for row in rows
+        ]
+
     async def count_remote_processing_slider_logs(self) -> int:
         """统计数据库中全部处理中的远程滑块风控日志。
 

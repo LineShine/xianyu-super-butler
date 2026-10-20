@@ -11,6 +11,7 @@ import hashlib
 import json
 import random
 import struct
+import threading
 import time
 from typing import Any, Dict, List
 
@@ -18,6 +19,9 @@ from loguru import logger
 
 
 CLOSE_NOTICE_API = "mtop.taobao.idlemessage.pc.profile.notice.update"
+
+_message_uuid_lock = threading.Lock()
+_last_message_uuid_timestamp = 0
 
 
 def canonical_goofish_item_url(item_id: Any) -> str:
@@ -80,8 +84,13 @@ def generate_mid() -> str:
 
 
 def generate_uuid() -> str:
-    """生成UUID"""
-    timestamp = int(time.time() * 1000)
+    """生成进程内唯一的消息 UUID，保留闲鱼现有的数字字符串格式。"""
+    global _last_message_uuid_timestamp
+    # 图文紧接着发送时可能处于同一毫秒。UUID 是消息去重键，不能只用
+    # 当前时间；时钟回拨或多个线程同时发送时也必须保持严格递增。
+    with _message_uuid_lock:
+        timestamp = max(int(time.time() * 1000), _last_message_uuid_timestamp + 1)
+        _last_message_uuid_timestamp = timestamp
     return f"-{timestamp}1"
 
 

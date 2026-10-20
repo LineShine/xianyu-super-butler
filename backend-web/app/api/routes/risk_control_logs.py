@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import BaseModel, Field
 
 from app.api import deps
 from app.services.risk_control_log_service import RiskControlLogService
@@ -24,6 +26,124 @@ class LocalSliderConfigUpdate(BaseModel):
     """本机滑块处理开关更新参数。"""
 
     enabled: bool
+
+
+class ManualCaptchaStart(BaseModel):
+    account_id: str = Field(min_length=1, max_length=80)
+
+
+class ManualCaptchaClaim(BaseModel):
+    client_id: str = Field(min_length=16, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
+
+
+class ManualCaptchaInput(BaseModel):
+    kind: Literal["down", "move", "up", "wheel", "key"]
+    x: float = Field(default=0, ge=0, le=900, allow_inf_nan=False)
+    y: float = Field(default=0, ge=0, le=560, allow_inf_nan=False)
+    delta: float = Field(default=0, ge=-560, le=560, allow_inf_nan=False)
+    key: Literal["Tab", "Shift+Tab", "Enter", "Space", "ArrowLeft", "ArrowRight"] = "Tab"
+
+
+class ManualCaptchaInputs(BaseModel):
+    sequence: int = Field(ge=1)
+    events: list[ManualCaptchaInput] = Field(min_length=1, max_length=64)
+
+
+@router.post("/risk-control-logs/manual-verification")
+async def start_manual_verification(
+    payload: ManualCaptchaStart,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> dict:
+    from common.services.manual_verification_queue import enqueue
+    log_id = await enqueue(payload.account_id, user=current_user)
+    return {"success": True, "data": {"log_id": log_id}, "message": "已加入手动验证队列"}
+
+
+@router.get("/risk-control-logs/manual-verification/queue")
+async def manual_verification_queue(
+    response: Response,
+    client_id: str = Query(default="", max_length=80),
+    current_user: User = Depends(deps.get_current_active_user),
+) -> dict:
+    from common.services.manual_verification_queue import advance
+    response.headers["Cache-Control"] = "no-store"
+    data = await advance(user=current_user, client_id=client_id)
+    data.pop("claim", None)
+    return {"success": True, "data": data}
+
+
+@router.post("/risk-control-logs/manual-verification/queue/claim")
+async def claim_manual_verification(
+    payload: ManualCaptchaClaim,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> dict:
+    from app.services.manual_captcha_service import manual_captcha_manager
+    return {"success": True, "data": await manual_captcha_manager.claim(current_user, payload.client_id)}
+
+
+@router.get("/risk-control-logs/manual-verification/{session_id}")
+async def get_manual_verification(
+    session_id: str, response: Response,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> dict:
+    from app.services.manual_captcha_service import manual_captcha_manager
+    response.headers["Cache-Control"] = "no-store"
+    session = await manual_captcha_manager.access(session_id, current_user)
+    return {"success": True, "data": await manual_captcha_manager.snapshot(session)}
+
+
+@router.post("/risk-control-logs/manual-verification/{session_id}/input")
+async def input_manual_verification(
+    session_id: str, payload: ManualCaptchaInputs,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> dict:
+    from app.services.manual_captcha_service import manual_captcha_manager
+    session = await manual_captcha_manager.access(session_id, current_user)
+    data = await manual_captcha_manager.input(session, payload.sequence, payload.events)
+    return {"success": True, "data": data}
+
+
+@router.post("/risk-control-logs/manual-verification/{session_id}/check")
+async def check_manual_verification(
+    session_id: str,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> dict:
+    from app.services.manual_captcha_service import manual_captcha_manager
+    session = await manual_captcha_manager.access(session_id, current_user)
+    return {"success": True, "data": await manual_captcha_manager.check(session)}
+
+
+@router.post("/risk-control-logs/manual-verification/{session_id}/refresh")
+async def refresh_manual_verification(
+    session_id: str,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> dict:
+    from app.services.manual_captcha_service import manual_captcha_manager
+    session = await manual_captcha_manager.access(session_id, current_user)
+    return {"success": True, "data": await manual_captcha_manager.refresh(session)}
+
+
+@router.delete("/risk-control-logs/manual-verification/{session_id}")
+async def close_manual_verification(
+    session_id: str,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> dict:
+    from app.services.manual_captcha_service import manual_captcha_manager
+    session = manual_captcha_manager.sessions.get(session_id)
+    if session:
+        if session.operator_id != current_user.id:
+            raise HTTPException(404, "验证窗口不存在")
+        await manual_captcha_manager.close(session)
+    return {"success": True}
+
+
+@router.get("/risk-control-logs/paused-accounts")
+async def list_paused_accounts(
+    current_user: User = Depends(deps.get_current_active_user),
+    risk_log_service: RiskControlLogService = Depends(deps.get_risk_log_service),
+) -> dict:
+    owner_id, _ = resolve_owner_scope(current_user)
+    return {"success": True, "data": await risk_log_service.list_paused_accounts(owner_id)}
 
 
 @router.get("/risk-control-logs")
