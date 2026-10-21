@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { ACCOUNT_RISK_UPDATED } from '@/components/layout/AccountRiskBanner'
 import { Plus, RefreshCw, QrCode, Key, Edit2, Trash2, Power, PowerOff, X, Loader2, Clock, CheckCircle, MessageSquare, Bot, Globe, Timer, ScanFace, ChevronLeft, ChevronRight, ChevronDown, ImagePlus, Filter, Repeat, MoreHorizontal, PackageCheck, Star, ShieldCheck, Flower2, Eye, EyeOff, Ban, Download, Upload, Send, Ticket, AlertCircle, Truck } from 'lucide-react'
@@ -132,9 +133,43 @@ export function Accounts() {
   // 「所属用户」筛选输入框的本地草稿（仅管理员使用）：输入过程不触发接口，回车/失焦/点击查询按钮时提交
   const [ownerUsernameInput, setOwnerUsernameInput] = useState('')
   
-  // 更多操作下拉菜单状态
+  // 更多操作菜单向上展开，右边缘与触发按钮对齐。
   const [moreMenuAccountId, setMoreMenuAccountId] = useState<string | null>(null)
-  const [moreMenuPosition, setMoreMenuPosition] = useState<{ top: number; right: number }>({ top: 0, right: 0 })
+  const moreMenuTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const [moreMenuPosition, setMoreMenuPosition] = useState({ bottom: 0, right: 0, maxHeight: 0 })
+
+  const updateMoreMenuPosition = useCallback(() => {
+    const trigger = moreMenuTriggerRef.current
+    if (!trigger) return
+    const rect = trigger.getBoundingClientRect()
+    if (!trigger.isConnected || rect.top <= 12 || rect.top >= window.innerHeight) {
+      setMoreMenuAccountId(null)
+      return
+    }
+    setMoreMenuPosition({
+      bottom: window.innerHeight - rect.top + 4,
+      right: Math.max(8, Math.min(window.innerWidth - rect.right, window.innerWidth - 168)),
+      maxHeight: rect.top - 12,
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!moreMenuAccountId) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMoreMenuAccountId(null)
+        moreMenuTriggerRef.current?.focus()
+      }
+    }
+    window.addEventListener('scroll', updateMoreMenuPosition, true)
+    window.addEventListener('resize', updateMoreMenuPosition)
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('scroll', updateMoreMenuPosition, true)
+      window.removeEventListener('resize', updateMoreMenuPosition)
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [moreMenuAccountId, updateMoreMenuPosition])
 
   // 默认回复管理状态
   const [defaultReplyAccount, setDefaultReplyAccount] = useState<AccountWithKeywordCount | null>(null)
@@ -2671,7 +2706,7 @@ export function Accounts() {
                           <Trash2 className="w-3.5 h-3.5 text-red-500" />
                           <span className="text-red-600 dark:text-red-400">删除</span>
                         </button>
-                        {/* 更多操作下拉菜单 */}
+                        {/* 更多操作向上展开菜单 */}
                         <div className="relative group">
                           <button
                             onClick={(e) => {
@@ -2679,13 +2714,15 @@ export function Accounts() {
                               if (moreMenuAccountId === account.id) {
                                 setMoreMenuAccountId(null)
                               } else {
-                                const rect = e.currentTarget.getBoundingClientRect()
-                                setMoreMenuPosition({ top: rect.bottom + 4, right: window.innerWidth - rect.right })
+                                moreMenuTriggerRef.current = e.currentTarget
                                 setMoreMenuAccountId(account.id)
+                                updateMoreMenuPosition()
                               }
                             }}
                             className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
                             title="更多操作"
+                            aria-expanded={moreMenuAccountId === account.id}
+                            aria-controls={moreMenuAccountId === account.id ? 'account-more-actions' : undefined}
                           >
                             <MoreHorizontal className="w-4 h-4 text-slate-500" />
                             <span className="text-slate-600 dark:text-slate-400">更多</span>
@@ -2700,16 +2737,19 @@ export function Accounts() {
           </table>
           )}
 
-        {/* 更多操作下拉菜单 - 移到表格外部避免overflow裁剪 */}
-        {moreMenuAccountId && (
+        {/* 挂载到 body，避免表格滚动容器裁剪；上方空间不足时在菜单内滚动。 */}
+        {moreMenuAccountId && createPortal(
           <>
             <div 
               className="fixed inset-0 z-40" 
               onClick={() => setMoreMenuAccountId(null)}
             />
             <div 
-              className="fixed z-50 w-40 bg-white dark:bg-slate-800 rounded-lg shadow-lg ring-1 ring-black/5 dark:ring-white/10 py-1"
-              style={{ top: moreMenuPosition.top, right: moreMenuPosition.right }}
+              id="account-more-actions"
+              role="group"
+              aria-label="账号更多操作"
+              className="fixed z-50 w-40 max-w-[calc(100vw-16px)] overflow-y-auto overscroll-contain bg-white dark:bg-slate-800 rounded-lg shadow-lg ring-1 ring-black/5 dark:ring-white/10 py-1"
+              style={moreMenuPosition}
             >
               {(() => {
                 const account = accounts.find(a => a.id === moreMenuAccountId)
@@ -2797,7 +2837,7 @@ export function Accounts() {
                 )
               })()}
             </div>
-          </>
+          </>, document.body,
         )}
         </div>
         

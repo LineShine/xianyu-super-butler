@@ -182,6 +182,7 @@ export interface RiskLog {
   message: string
   processing_result: string
   processing_status: string
+  can_manual_verify: boolean
   captcha_engine: string | null
   call_type: string | null
   call_user: string | null
@@ -220,6 +221,7 @@ export const getRiskLogs = async (params?: {
     event_description: string
     processing_result: string
     processing_status: string
+    can_manual_verify?: boolean
     captcha_engine: string | null
     call_type: string | null
     call_user: string | null
@@ -236,6 +238,7 @@ export const getRiskLogs = async (params?: {
     message: item.event_description || '',
     processing_result: item.processing_result || '',
     processing_status: item.processing_status || '',
+    can_manual_verify: item.can_manual_verify === true,
     captcha_engine: item.captcha_engine ?? null,
     call_type: item.call_type ?? null,
     call_user: item.call_user ?? null,

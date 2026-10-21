@@ -201,11 +201,16 @@ class RiskControlLogService:
             self.session,
             YtxRiskControlLog,
             filters=filters,
-            order_by=[YtxRiskControlLog.created_at.desc()],
+            order_by=[YtxRiskControlLog.created_at.desc(), YtxRiskControlLog.id.desc()],
             limit=limit,
             offset=offset,
         )
 
+        manual_log_ids = await self.get_manual_verification_log_ids(
+            owner_id=owner_id,
+            account_ids={log.account_identifier for log in logs if log.account_identifier},
+            force_refresh=True,
+        )
         items = [
             {
                 "id": log.id,
@@ -215,6 +220,7 @@ class RiskControlLogService:
                 "event_description": log.event_description,
                 "processing_result": log.processing_result,
                 "processing_status": log.processing_status,
+                "can_manual_verify": log.id in manual_log_ids,
                 "captcha_engine": log.captcha_engine,
                 "call_type": log.call_type,
                 "call_user": log.call_user,
@@ -225,6 +231,40 @@ class RiskControlLogService:
             for log in logs
         ]
         return items, total
+
+    async def get_manual_verification_log_ids(
+        self, *, owner_id: int | None, account_ids: set[str], force_refresh: bool = False,
+    ) -> set[int]:
+        """Only the latest unresolved log of an existing offline account is actionable.
+
+        The latest record is selected before applying status/date/page filters,
+        so filtering out a newer success never revives an obsolete failure.
+        """
+        if not account_ids:
+            return set()
+        from app.services.dashboard_stats_service import DashboardStatsService
+        online_ids = await DashboardStatsService(self.session).get_online_account_ids(force_refresh=force_refresh)
+        latest_id = (
+            select(YtxRiskControlLog.id)
+            .where(YtxRiskControlLog.account_identifier == YtxAccount.account_id)
+            .order_by(YtxRiskControlLog.created_at.desc(), YtxRiskControlLog.id.desc())
+            .limit(1).correlate(YtxAccount).scalar_subquery()
+        )
+        stmt = select(YtxRiskControlLog.id).select_from(YtxAccount).join(
+            YtxRiskControlLog, YtxRiskControlLog.id == latest_id,
+        ).where(
+            YtxAccount.account_id.in_(account_ids),
+            YtxAccount.account_id.notin_(online_ids),
+            YtxAccount.status != "deleted",
+            or_(YtxRiskControlLog.owner_id.is_(None), YtxRiskControlLog.owner_id == YtxAccount.owner_id),
+            or_(YtxRiskControlLog.account_pk.is_(None), YtxRiskControlLog.account_pk == YtxAccount.id),
+            or_(YtxRiskControlLog.call_type.is_(None), YtxRiskControlLog.call_type != "remote"),
+            YtxRiskControlLog.event_type.in_(["slider_captcha", "manual_slider_captcha", "manual_slider_queue"]),
+            YtxRiskControlLog.processing_status.in_(["failed", "error", "cancelled"]),
+        )
+        if owner_id is not None:
+            stmt = stmt.where(YtxAccount.owner_id == owner_id)
+        return set((await self.session.execute(stmt)).scalars().all())
 
     async def get_today_success_rate(self, *, owner_id: int | None = None) -> dict:
         """

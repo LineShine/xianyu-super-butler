@@ -32,8 +32,8 @@ const checked = async <T extends Response>(pending: Promise<T>): Promise<T> => {
   return result
 }
 
-export const startManualVerification = (accountId: string) =>
-  checked(post<Response & { data: { log_id: number } }>(PREFIX, { account_id: accountId }))
+export const startManualVerification = (accountId: string, logId?: string) =>
+  checked(post<Response & { data: { log_id: number } }>(PREFIX, { account_id: accountId, log_id: logId }))
 export const getManualVerification = (sessionId: string) =>
   checked(get<Result>(`${PREFIX}/${sessionId}`, { timeout: 15000 }))
 export const sendVerificationInput = (sessionId: string, sequence: number, events: VerificationInput[]) =>

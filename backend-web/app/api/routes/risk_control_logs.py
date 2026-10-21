@@ -30,6 +30,7 @@ class LocalSliderConfigUpdate(BaseModel):
 
 class ManualCaptchaStart(BaseModel):
     account_id: str = Field(min_length=1, max_length=80)
+    log_id: int | None = Field(default=None, ge=1)
 
 
 class ManualCaptchaClaim(BaseModel):
@@ -53,8 +54,15 @@ class ManualCaptchaInputs(BaseModel):
 async def start_manual_verification(
     payload: ManualCaptchaStart,
     current_user: User = Depends(deps.get_current_active_user),
+    risk_log_service: RiskControlLogService = Depends(deps.get_risk_log_service),
 ) -> dict:
     from common.services.manual_verification_queue import enqueue
+    owner_id, _ = resolve_owner_scope(current_user)
+    eligible_ids = await risk_log_service.get_manual_verification_log_ids(
+        owner_id=owner_id, account_ids={payload.account_id}, force_refresh=True,
+    )
+    if not eligible_ids or (payload.log_id is not None and payload.log_id not in eligible_ids):
+        raise HTTPException(409, "账号已在线或这条记录已无需验证，请刷新风控日志")
     log_id = await enqueue(payload.account_id, user=current_user)
     return {"success": True, "data": {"log_id": log_id}, "message": "已加入手动验证队列"}
 

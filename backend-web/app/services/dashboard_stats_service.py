@@ -315,14 +315,14 @@ class DashboardStatsService:
             logger.warning(f"获取在线账号数失败: {e}")
         return 0
 
-    async def get_online_account_ids(self) -> frozenset[str]:
+    async def get_online_account_ids(self, *, force_refresh: bool = False) -> frozenset[str]:
         """实时获取真实 WebSocket 在线账号 ID 集合（10 秒 TTL 缓存）。
 
         口径与仪表盘“在线账号”一致：取 websocket 服务 connection-stats 的
         connected_account_ids（真正建立 WebSocket 连接的账号）。失败返回空集合。
         """
         now = time.time()
-        if self.__class__._online_ids_cache is not None:
+        if not force_refresh and self.__class__._online_ids_cache is not None:
             ts, ids = self.__class__._online_ids_cache
             if now - ts < self._ONLINE_IDS_CACHE_TTL:
                 return ids

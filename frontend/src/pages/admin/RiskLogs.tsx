@@ -10,7 +10,7 @@
  * 6. 支持分页
  * 7. 支持清空日志
  */
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { ShieldAlert, RefreshCw, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Loader2, Calendar, Info, TrendingUp, Settings } from 'lucide-react'
 import { getRiskLogs, clearRiskLogs, clearProcessingRiskLogs, testRemoteSliderSolve, getRemoteCaptchaConfig, saveRemoteCaptchaConfig, getRiskTodaySuccessRate, getLocalSliderConfig, updateLocalSliderConfig, type RiskLog, type RiskTodaySuccessRate } from '@/api/admin'
 import { getAccountDetails } from '@/api/accounts'
@@ -20,6 +20,7 @@ import { PageLoading } from '@/components/common/Loading'
 import { Select } from '@/components/common/Select'
 import { ConfirmModal } from '@/components/common/ConfirmModal'
 import { startManualVerification, MANUAL_VERIFICATION_UPDATED } from '@/api/manualVerification'
+import { ACCOUNT_RISK_UPDATED } from '@/components/layout/AccountRiskBanner'
 import { getApiErrorMessage } from '@/utils/request'
 import { getBeijingDateInputValue } from '@/utils/date'
 import type { Account } from '@/types'
@@ -38,6 +39,8 @@ export function RiskLogs() {
   const { isAuthenticated, token, _hasHydrated, user } = useAuthStore()
   const [loading, setLoading] = useState(true)
   const [logs, setLogs] = useState<RiskLog[]>([])
+  const loadSequence = useRef(0)
+  const appliedQuery = useRef<Parameters<typeof getRiskLogs>[0]>()
   const [accounts, setAccounts] = useState<Account[]>([])
   const [selectedAccount, setSelectedAccount] = useState('')
 
@@ -100,43 +103,58 @@ export function RiskLogs() {
     return log.processing_status || '-'
   }
 
-  const loadLogs = async (nextPage: number = currentPage, nextPageSize: number = pageSize) => {
+  const loadLogs = async (nextPage: number = currentPage, nextPageSize: number = pageSize, quiet = false) => {
     if (!_hasHydrated || !isAuthenticated || !token) return
+    const sequence = ++loadSequence.current
+    const query = quiet && appliedQuery.current ? appliedQuery.current : {
+      page: nextPage,
+      pageSize: nextPageSize,
+      cookie_id: selectedAccount || undefined,
+      start_date: startDate || undefined,
+      end_date: endDate || undefined,
+      processing_status: selectedStatus || undefined,
+      call_type: selectedCallType || undefined,
+      call_user: callUserKeyword.trim() || undefined,
+    }
+    appliedQuery.current = query
     try {
-      setLoading(true)
-      const result = await getRiskLogs({ 
-        page: nextPage,
-        pageSize: nextPageSize,
-        cookie_id: selectedAccount || undefined,
-        start_date: startDate || undefined,
-        end_date: endDate || undefined,
-        processing_status: selectedStatus || undefined,
-        call_type: selectedCallType || undefined,
-        call_user: callUserKeyword.trim() || undefined,
-      })
+      if (!quiet) setLoading(true)
+      const result = await getRiskLogs(query)
+      if (sequence !== loadSequence.current) return
       if (result.success) {
         setLogs(result.data || [])
-        setCurrentPage(nextPage)
-        setPageSize(nextPageSize)
+        setCurrentPage(query.page || nextPage)
+        setPageSize(query.pageSize || nextPageSize)
         setTotal(result.total || 0)
       } else {
         setLogs([])
-        setCurrentPage(nextPage)
-        setPageSize(nextPageSize)
+        setCurrentPage(query.page || nextPage)
+        setPageSize(query.pageSize || nextPageSize)
         setTotal(0)
         addToast({ type: 'error', message: result.message || '加载风控日志失败' })
       }
     } catch (error) {
-      addToast({ type: 'error', message: getApiErrorMessage(error, '加载风控日志失败') })
+      if (sequence !== loadSequence.current) return
+      setLogs(previous => previous.map(log => ({ ...log, can_manual_verify: false })))
+      if (!quiet) addToast({ type: 'error', message: getApiErrorMessage(error, '加载风控日志失败') })
     } finally {
-      setLoading(false)
+      if (sequence === loadSequence.current) setLoading(false)
     }
   }
 
   useEffect(() => {
-    const refresh = () => { void loadLogs() }
+    if (!_hasHydrated || !isAuthenticated || !token) return
+    const refresh = () => { void loadLogs(currentPage, pageSize, true) }
+    const timer = window.setInterval(refresh, 10000)
     window.addEventListener(MANUAL_VERIFICATION_UPDATED, refresh)
-    return () => window.removeEventListener(MANUAL_VERIFICATION_UPDATED, refresh)
+    window.addEventListener(ACCOUNT_RISK_UPDATED, refresh)
+    window.addEventListener('focus', refresh)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener(MANUAL_VERIFICATION_UPDATED, refresh)
+      window.removeEventListener(ACCOUNT_RISK_UPDATED, refresh)
+      window.removeEventListener('focus', refresh)
+    }
   })
 
   // 加载当日成功率（独立于筛选条件，统计北京时间当天）
@@ -853,7 +871,7 @@ export function RiskLogs() {
                       </span>
                     </td>
                     <td>
-                      <span className={`text-xs px-2 py-1 rounded ${
+                      <span className={`inline-flex items-center whitespace-nowrap text-xs px-2 py-1 rounded ${
                         log.processing_status === 'success' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
                         log.processing_status === 'failed' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' :
                         log.processing_status === 'processing' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' :
@@ -861,17 +879,18 @@ export function RiskLogs() {
                       }`}>
                         {getProcessingStatusLabel(log)}
                       </span>
-                      {log.call_type !== 'remote' && ['slider_captcha', 'manual_slider_captcha', 'manual_slider_queue'].includes(log.risk_type) && log.processing_status !== 'success' && (
+                      {log.can_manual_verify && (
                         <button
                           className="mt-2 block whitespace-nowrap rounded-lg border border-blue-200 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-950/30"
                           onClick={async () => {
                             try {
-                              await startManualVerification(log.cookie_id)
+                              await startManualVerification(log.cookie_id, log.id)
                               window.dispatchEvent(new Event(MANUAL_VERIFICATION_UPDATED))
                               addToast({ type: 'success', message: '已加入验证队列，轮到时会自动打开' })
                               void loadLogs()
                             } catch (error) {
                               addToast({ type: 'error', message: getApiErrorMessage(error, '加入验证队列失败') })
+                              void loadLogs()
                             }
                           }}
                         >手动验证</button>
@@ -879,21 +898,21 @@ export function RiskLogs() {
                     </td>
                     <td>
                       {log.captcha_engine === 'manual' ? (
-                        <span className="text-xs px-2 py-1 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">手动操作</span>
+                        <span className="inline-flex items-center whitespace-nowrap text-xs px-2 py-1 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">手动操作</span>
                       ) : log.captcha_engine === 'drissionpage' ? (
-                        <span className="text-xs px-2 py-1 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">
+                        <span className="inline-flex items-center whitespace-nowrap text-xs px-2 py-1 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">
                           兜底引擎
                         </span>
                       ) : log.captcha_engine === 'playwright' ? (
-                        <span className="text-xs px-2 py-1 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
+                        <span className="inline-flex items-center whitespace-nowrap text-xs px-2 py-1 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
                           主引擎
                         </span>
                       ) : log.captcha_engine === 'real_mouse' ? (
-                        <span className="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                        <span className="inline-flex items-center whitespace-nowrap text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
                           真人鼠标
                         </span>
                       ) : log.captcha_engine === 'remote' ? (
-                        <span className="text-xs px-2 py-1 rounded bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-400">
+                        <span className="inline-flex items-center whitespace-nowrap text-xs px-2 py-1 rounded bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-400">
                           远程接口
                         </span>
                       ) : (
@@ -902,11 +921,11 @@ export function RiskLogs() {
                     </td>
                     <td>
                       {log.call_type === 'remote' ? (
-                        <span className="text-xs px-2 py-1 rounded bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">
+                        <span className="inline-flex items-center whitespace-nowrap text-xs px-2 py-1 rounded bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">
                           远程
                         </span>
                       ) : (
-                        <span className="text-xs px-2 py-1 rounded bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+                        <span className="inline-flex items-center whitespace-nowrap text-xs px-2 py-1 rounded bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300">
                           本机
                         </span>
                       )}
