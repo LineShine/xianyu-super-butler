@@ -118,6 +118,10 @@ createRoot(document.getElementById('root')!).render(<React.StrictMode><MemoryRou
             await page.mouse.down()
             await page.mouse.move(box['x'] + 220, box['y'] + 300, steps=6)
             await page.mouse.up()
+            await page.wait_for_timeout(2200)
+            assert checked == [], 'Dragging/releasing/polling must not request a Token'
+            await expect(page.get_by_role('dialog')).to_be_visible()
+            await page.get_by_role('button', name='验证结果', exact=True).click()
             await expect(page.get_by_text('验证通过，账号已自动启用，正在恢复连接', exact=True)).to_be_visible(timeout=6000)
             assert checked == ['E'], checked
             assert [e['kind'] for e in inputs][0] == 'down'
@@ -125,7 +129,7 @@ createRoot(document.getElementById('root')!).render(<React.StrictMode><MemoryRou
             await expect(page.get_by_role('dialog')).to_have_count(0, timeout=6000)
             assert 'E' in deleted
             assert errors == [], errors
-            print('PASS: auto-navigation, auto-open, StrictMode, countdown, timeout/close/skip/Esc→next, route persistence, drag→success→close')
+            print('PASS: queue navigation, countdown, close/timeout→next, drag without check, explicit button→success→close')
             print('Screenshot: /tmp/yutaixian-manual-verification-queue.png')
             await browser.close()
     finally:

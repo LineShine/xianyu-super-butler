@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from app.api.routes.risk_control_logs import ManualCaptchaInput, ManualCaptchaInputs
 from app.services.manual_captcha_service import (
     LEASE_KEY, ManualCaptchaManager, ManualSession, allowed_url, check_account, token_failure_message,
+    verification_outcome,
 )
 from common.models.user import UserRole
 from common.models.ytx_account import YtxAccount
@@ -53,6 +54,11 @@ def success_database(active):
 
 
 class ManualCaptchaTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.diagnostics = patch.object(ManualCaptchaManager, "_record_check", AsyncMock())
+        self.diagnostics.start()
+        self.addCleanup(self.diagnostics.stop)
+
     def test_challenge_url_and_resources_are_restricted(self):
         self.assertTrue(allowed_url("https://h5api.m.goofish.com/h5/a/punish?x5secdata=a", challenge=True))
         self.assertTrue(allowed_url("https://g.alicdn.com/script.js"))
@@ -131,11 +137,53 @@ class ManualCaptchaTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_probe_calls_official_endpoint_once_without_remote_fallback(self):
         manager, active = ManualCaptchaManager(), session()
+        active.cookies["deleted_cookie"] = "must-not-be-saved"
+        active.context = SimpleNamespace(cookies=AsyncMock(side_effect=[
+            [{"name": "unb", "value": "123"}, {"name": "_m_h5_tk", "value": "old"}],
+            [{"name": "unb", "value": "123"}, {"name": "_m_h5_tk", "value": "new"}],
+        ]))
         result = SimpleNamespace(response_cookies={"_m_h5_tk": "new"})
         with patch("app.services.manual_captcha_service.request_im_token", new=AsyncMock(return_value=result)) as probe:
             await manager._probe(active)
-        probe.assert_awaited_once_with(active.original_cookie, "device", api_mode="web", timeout_seconds=20)
+        probe.assert_awaited_once_with("unb=123; _m_h5_tk=old", "device", api_mode="web",
+                                      timeout_seconds=20, browser_context=active.context)
         self.assertEqual(active.cookies["_m_h5_tk"], "new")
+        self.assertNotIn("deleted_cookie", active.cookies)
+        self.assertEqual(active.context.cookies.await_args.args, (["https://h5api.m.goofish.com/h5/mtop.taobao.idlemessage.pc.login.token/1.0/"],))
+
+    def test_return_codes_distinguish_login_signing_and_rate_limit_from_slider_failure(self):
+        for code, cookies, category, terminal in [
+            ("FAIL_SYS_SESSION_EXPIRED", {}, "login_expired", True),
+            ("FAIL_SYS_TOKEN_EXOIRED", {"_m_h5_tk": "new"}, "signing_cookie_updated", False),
+            ("FAIL_SYS_TOKEN_EMPTY", {}, "signing_cookie_invalid", True),
+            ("FAIL_SYS_USER_VALIDATE", {}, "verification_pending", False),
+            ("FAIL_SYS_TRAFFIC_LIMIT", {}, "rate_limited", True),
+            ("SUCCESS", {}, "missing_token", False),
+        ]:
+            with self.subTest(code=code):
+                result = SimpleNamespace(response_json={"ret": [code + "::secret-url-cookie"]},
+                                         response_cookies=cookies, status_code=200)
+                actual, message, ended = verification_outcome(result)
+                self.assertEqual((actual, ended), (category, terminal))
+                self.assertNotIn("secret-url-cookie", message)
+
+    async def test_signing_rotation_waits_for_another_explicit_check(self):
+        manager, active = ManualCaptchaManager(), session()
+        active.status, active.interactions = "ready", 1
+        manager._probe = AsyncMock(side_effect=[
+            SimpleNamespace(response_json={"ret": ["FAIL_SYS_TOKEN_EXOIRED"]},
+                            response_cookies={"_m_h5_tk": "new"}),
+            SimpleNamespace(response_json={"ret": ["SUCCESS::调用成功"], "data": {"accessToken": "verified"}}),
+        ])
+        manager._save_success = AsyncMock()
+        await manager.check(active)
+        self.assertEqual(manager._probe.await_count, 1)
+        self.assertEqual(active.status, "ready")
+        self.assertIn("凭据已更新", active.message)
+        manager._save_success.assert_not_awaited()
+        active.last_check = 0
+        await manager.check(active)
+        manager._save_success.assert_awaited_once()
 
     async def test_expired_signing_cookie_requires_explicit_bounded_refresh(self):
         manager, active = ManualCaptchaManager(), session()
@@ -232,6 +280,9 @@ class ManualCaptchaTests(unittest.IsolatedAsyncioTestCase):
     async def test_success_saves_token_resets_guard_enables_only_target_and_releases_queue(self):
         manager, active = ManualCaptchaManager(), session()
         db, account, log = success_database(active)
+        active.checks = ["check=1 result=verification_pending", "check=2 result=success"]
+        log.error_message = "earlier check did not pass"
+        log.event_description = "手动验证"
         other = SimpleNamespace(status="disabled", cookie="unb=456")
         manager._close_browser = AsyncMock()
         active.cookies["x5sec"] = "verified"
@@ -252,6 +303,8 @@ class ManualCaptchaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(other.cookie, "unb=456")
         self.assertEqual(other.status, "disabled")
         self.assertEqual(log.processing_status, "success")
+        self.assertIsNone(log.error_message)
+        self.assertIn("check=2 result=success", log.event_description)
         self.assertEqual(active.status, "success")
         start.assert_awaited_once()
         self.assertTrue(start.await_args.args[0].endswith("/internal/accounts/123/start"))

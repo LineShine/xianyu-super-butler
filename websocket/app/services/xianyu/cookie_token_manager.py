@@ -1497,6 +1497,13 @@ class CookieTokenManager:
     # ==================== 密码登录刷新 ====================
 
     async def try_password_login_refresh(self, trigger_reason: str = "令牌/Session过期"):
+        from common.services.account_credential_guard import credential_renewal
+        async with credential_renewal(self.cookie_id) as acquired:
+            if not acquired:
+                return "skipped_cooldown"
+            return await self._try_password_login_refresh(trigger_reason)
+
+    async def _try_password_login_refresh(self, trigger_reason: str = "令牌/Session过期"):
         """尝试通过密码登录刷新Cookie并重启实例
 
         每次调用都会写入一条账号登录日志（ytx_account_login_logs），便于在
@@ -1581,9 +1588,9 @@ class CookieTokenManager:
             try:
                 from common.services.cookie_renew_api_service import cookie_renew_api_service
                 logger.info(f"【{self.cookie_id}】先尝试接口续期（silentHasLogin + setLoginSettings）...")
-                # 记录续期前的全量cookies
-                logger.info(f"【{self.cookie_id}】[续期前全量Cookies] {self.cookies_str}")
                 renew_result = await cookie_renew_api_service.renew(self.cookies_str, self.cookie_id)
+                if renew_result.deferred:
+                    return "skipped_cooldown"
 
                 # 不管续期是否成功，只要有Cookie字段更新就先写入数据库
                 if renew_result.updated_cookie_names:
@@ -1596,9 +1603,6 @@ class CookieTokenManager:
                         f"{len(renew_result.updated_cookie_names)} 个字段："
                         f"{', '.join(renew_result.updated_cookie_names)}"
                     )
-
-                # 记录续期后的全量cookies（不管成功失败都打印）
-                logger.info(f"【{self.cookie_id}】[续期后全量Cookies] {self.cookies_str}")
 
                 if renew_result.success:
                     # 续期成功（可能是接口续期或浏览器续期），跳过密码登录
@@ -1628,6 +1632,9 @@ class CookieTokenManager:
                     f"【{self.cookie_id}】续期异常（不影响后续密码登录）: {self._safe_str(renew_exc)}"
                 )
 
+            from common.services.account_credential_guard import verification_pending
+            if await verification_pending(self.cookie_id):
+                return "skipped_cooldown"
             # ====== 续期未成功，继续原有密码登录流程 ======
             # 标记续期失败原因（闭包变量，_record_login_log 会自动拼接）
             _api_renew_fail_msg = "接口续期和浏览器续期均失败"

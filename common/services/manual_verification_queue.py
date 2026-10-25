@@ -20,6 +20,7 @@ from common.models.system_setting import SystemSetting
 from common.models.ytx_account import YtxAccount
 from common.utils.auth_scope import resolve_owner_scope
 from common.utils.xianyu_utils import trans_cookies
+from common.services.account_credential_guard import renewal_in_progress
 
 QUEUE_KEY = "manual_verification_queue"
 HOLD_KEY = "manual_verification_hold"
@@ -170,6 +171,13 @@ async def advance(*, user=None, client_id: str = "", claim_request: bool = False
             return {"pending_count": 0, "available": False}
         account = pending[0]
         state = state_of(account)
+        if renewal_in_progress(account):
+            # Finish the in-flight renewal before starting the 60-second window.
+            log = await db.get(YtxRiskControlLog, state["log_id"])
+            if log:
+                log.processing_result = "等待该账号正在执行的登录续期结束，随后打开手动验证"
+            await db.commit()
+            return {"pending_count": sum(scope is None or a.owner_id == scope for a in pending), "available": False}
         if state["status"] == "queued":
             state.update(status="processing", expires_at=now + SESSION_SECONDS)
             log = await db.get(YtxRiskControlLog, state["log_id"])

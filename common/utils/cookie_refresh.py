@@ -288,10 +288,15 @@ async def update_account_cookies_in_db(
         是否更新成功
     """
     try:
+        from common.services.account_credential_guard import verification_holds_credentials
         if session:
             account = await get_account_by_identity(account_id, owner_id=owner_id, session=session)
             if not account:
                 logger.warning(f"【{account_id}】数据库中未找到账号，无法更新Cookie")
+                return False
+            await session.refresh(account, with_for_update=True)
+            if verification_holds_credentials(account):
+                await session.rollback()
                 return False
             account.cookie = new_cookies_str
             account.metadata_json = clear_cookie_refresh_snapshot(account.metadata_json)
@@ -303,6 +308,9 @@ async def update_account_cookies_in_db(
                 account = await get_account_by_identity(account_id, owner_id=owner_id, session=db_session)
                 if not account:
                     logger.warning(f"【{account_id}】数据库中未找到账号，无法更新Cookie")
+                    return False
+                await db_session.refresh(account, with_for_update=True)
+                if verification_holds_credentials(account):
                     return False
                 account.cookie = new_cookies_str
                 account.metadata_json = clear_cookie_refresh_snapshot(account.metadata_json)

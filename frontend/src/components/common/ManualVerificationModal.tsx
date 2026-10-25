@@ -30,8 +30,6 @@ export function ManualVerificationModal({ accountId, accountName, initialState, 
   const queue = useRef<VerificationInput[]>([])
   const sending = useRef<Promise<void> | null>(null)
   const sequence = useRef(initialState.sequence || 0)
-  const autoCheckTimer = useRef<ReturnType<typeof setTimeout>>()
-  const lastCheck = useRef(0)
   const pointer = useRef<number | null>(null)
   const lastMove = useRef(0)
   const checkInProgress = useRef(false)
@@ -67,7 +65,6 @@ export function ManualVerificationModal({ accountId, accountName, initialState, 
       document.body.style.overflow = previousOverflow
       document.removeEventListener('keydown', keyboard)
       previousFocus?.focus()
-      clearTimeout(autoCheckTimer.current)
       // StrictMode replays effects; defer cleanup so its immediate remount does
       // not close the server session that is about to be displayed.
       setTimeout(() => {
@@ -160,14 +157,10 @@ export function ManualVerificationModal({ accountId, accountName, initialState, 
     enqueue({ kind: 'up', ...position(event) })
     pointer.current = null
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
-    clearTimeout(autoCheckTimer.current)
-    autoCheckTimer.current = setTimeout(() => { void check() }, Math.max(1200, 10100 - (Date.now() - lastCheck.current)))
   }
 
   const check = async () => {
     if (pointer.current !== null || checkInProgress.current || !alive.current || state.status !== 'ready') return
-    clearTimeout(autoCheckTimer.current)
-    lastCheck.current = Date.now()
     checkInProgress.current = true
     setChecking(true)
     setError('')
@@ -218,7 +211,7 @@ export function ManualVerificationModal({ accountId, accountName, initialState, 
         </div>
         <div className="min-h-0 overflow-y-auto p-5">
           <div className="mb-4 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-800 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-200">
-            请在下方手动拖动滑块，松开后自动检查结果，验证成功后自动启用账号并恢复连接。倒计时结束或手动关闭弹窗，都会继续下一项；未通过验证的账号保持暂停，其他账号正常运行。
+            请在下方手动拖动滑块，等待闲鱼页面提示完成后，点击右下角「验证结果」。只有点击按钮才会重新获取 Token；确认通过后自动启用账号并恢复连接。每次间隔至少 10 秒，最多检查 3 次；倒计时结束或关闭弹窗会继续下一项。
           </div>
           {error && <div role="alert" className="mb-4 flex items-start gap-2 rounded-xl bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300"><XCircle className="mt-0.5 h-4 w-4 shrink-0" />{error}</div>}
           {state?.status === 'loading' && <div className="flex min-h-[280px] flex-col items-center justify-center gap-4 text-slate-500"><Loader2 className="h-8 w-8 animate-spin" /><p>{state.message}</p></div>}
@@ -269,7 +262,7 @@ export function ManualVerificationModal({ accountId, accountName, initialState, 
           <Link to={`/accounts?account_id=${encodeURIComponent(accountId)}`} onClick={onClose} className="flex items-center gap-1 text-sm text-blue-600">前往账号管理<ExternalLink className="h-3.5 w-3.5" /></Link>
           <div className="flex gap-3">
             <button onClick={onClose} className="btn-ios-secondary">跳过此项</button>
-            {ready && !failed && <button onClick={check} disabled={checking} className="btn-ios-primary flex items-center gap-2">{checking && <Loader2 className="h-4 w-4 animate-spin" />}检查验证结果</button>}
+            {ready && !failed && <button onClick={check} disabled={checking} className="btn-ios-primary flex items-center gap-2">{checking && <Loader2 className="h-4 w-4 animate-spin" />}验证结果</button>}
           </div>
         </div>
       </div>

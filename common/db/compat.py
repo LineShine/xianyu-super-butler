@@ -360,6 +360,12 @@ class DBManagerCompat:
         """更新账号信息"""
         async def _update(session_maker):
             async with session_maker() as session:
+                from common.services.account_credential_guard import verification_holds_credentials
+                account = (await session.execute(select(YtxAccount).where(
+                    YtxAccount.account_id == cookie_id
+                ).with_for_update())).scalar_one_or_none()
+                if not account or verification_holds_credentials(account):
+                    return False
                 values = {}
                 # 支持 cookie_value 和 value 两种参数名
                 if 'cookie_value' in kwargs:

@@ -70,6 +70,46 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         return await queue.enqueue(account.account_id, url=URL, device_id="device",
                                    expected_cookie=account.cookie)
 
+    async def test_renewal_finishes_before_human_countdown_and_is_account_scoped(self):
+        from common.services import account_credential_guard as guard
+        with patch.object(guard, "async_session_maker", self.db.session):
+            async with guard.credential_renewal(self.a.account_id) as acquired:
+                self.assertTrue(acquired)
+                self.assertTrue(guard.renewal_in_progress(self.a))
+                async with guard.credential_renewal(self.a.account_id) as nested:
+                    self.assertTrue(nested)
+                async with guard.credential_renewal(self.other.account_id) as other:
+                    self.assertTrue(other)
+                await self.add(self.a)
+                state = await queue.advance(user=self.admin)
+                self.assertFalse(state["available"])
+                self.assertEqual(state["pending_count"], 1)
+                self.assertEqual(queue.state_of(self.a)["expires_at"], 0)
+                self.assertEqual(queue.state_of(self.a)["status"], "queued")
+            self.assertFalse(guard.renewal_in_progress(self.a))
+            state = await queue.advance(user=self.admin)
+            self.assertTrue(state["available"])
+            self.assertGreater(state["expires_at"], time.time() + 58)
+            async with guard.credential_renewal(self.a.account_id) as acquired:
+                self.assertFalse(acquired)
+
+    async def test_late_renewal_result_is_discarded_when_verification_arrives(self):
+        from common.services import account_credential_guard as guard
+        from common.services.cookie_renew_api_service import CookieRenewApiService, CookieRenewApiResult
+        service = CookieRenewApiService()
+        async def network(*args):
+            await self.add(self.a)
+            return CookieRenewApiResult(success=True, new_cookies_str="unb=11; stale=true",
+                                        updated_cookie_names=["stale"])
+        with patch.object(guard, "async_session_maker", self.db.session), patch.object(service, "_renew", side_effect=network):
+            original = self.a.cookie
+            result = await service.renew(original, self.a.account_id)
+            self.assertTrue(result.deferred)
+            self.assertFalse(result.need_password_login)
+            self.assertEqual(result.updated_cookie_names, [])
+            self.assertEqual(self.a.cookie, original)
+            self.assertEqual(queue.state_of(self.a)["status"], "queued")
+
     async def test_duplicate_concurrent_triggers_have_one_queue_item(self):
         ids = await asyncio.gather(*(self.add(self.a) for _ in range(5)))
         self.assertEqual(ids, [1] * 5)

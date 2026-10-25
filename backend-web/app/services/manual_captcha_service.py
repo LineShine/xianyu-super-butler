@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.dialects.mysql import insert
 
@@ -24,11 +25,14 @@ from common.models.risk_control_log import YtxRiskControlLog
 from common.models.token_cache import TokenCache
 from common.models.ytx_account import YtxAccount
 from common.services.captcha.token_response import extract_token_captcha_url, is_token_expired_response
-from common.services.im_token_api import extract_im_access_token, request_im_token
+from common.services.im_token_api import (
+    IM_TOKEN_USER_AGENT, build_im_token_api_url, extract_im_access_token, request_im_token,
+)
 from common.utils.auth_scope import resolve_owner_scope
 from common.services import manual_verification_queue as verification_queue
 from common.services.slider_retry_guard import MANUAL_RESUME_KEY, reset_slider_guard
 from common.utils.xianyu_utils import generate_device_id, trans_cookies
+from common.utils.time_utils import get_beijing_now_naive
 
 LEASE_KEY = "manual_captcha_session"
 SESSION_SECONDS = verification_queue.SESSION_SECONDS
@@ -58,6 +62,39 @@ def allowed_url(url: str, *, challenge: bool = False) -> bool:
 
 def cookie_string(cookies: dict) -> str:
     return "; ".join(f"{key}={value}" for key, value in cookies.items())
+
+
+def token_return_codes(response: object) -> list[str]:
+    values = response.get("ret", []) if isinstance(response, dict) else []
+    values = [values] if isinstance(values, str) else values
+    if not isinstance(values, (list, tuple)):
+        return []
+    codes = [str(value).split("::", 1)[0] for value in values]
+    return [code for code in codes if re.fullmatch(r"[A-Z][A-Z0-9_]{1,79}", code)][:3]
+
+
+def verification_outcome(result) -> tuple[str, str, bool]:
+    """A failed Token check is not evidence of a failed human slider gesture."""
+    response = result.response_json
+    codes = token_return_codes(response)
+    suffix = f"（{', '.join(codes)}）" if codes else ""
+    if extract_im_access_token(response):
+        return "success", "闲鱼接口验证通过，验证结果已保存。", False
+    if "FAIL_SYS_SESSION_EXPIRED" in codes:
+        return "login_expired", "闲鱼登录已过期，请到账号管理重新登录；滑块通过不能恢复登录。" + suffix, True
+    if is_token_expired_response(response) or "FAIL_SYS_TOKEN_EMPTY" in codes:
+        if getattr(result, "response_cookies", {}).get("_m_h5_tk"):
+            return "signing_cookie_updated", "网页签名凭据已更新，请间隔十秒后点击「验证结果」再检查；本次未判定滑块失败。" + suffix, False
+        return "signing_cookie_invalid", "网页签名凭据失效，请重新登录或重新打开验证；本次未判定滑块失败。" + suffix, True
+    if getattr(result, "status_code", 0) == 429 or any("LIMIT" in code for code in codes):
+        return "rate_limited", "闲鱼接口暂时限流，请稍后再验证；本次未判定滑块失败。" + suffix, True
+    if getattr(result, "status_code", 0) >= 500:
+        return "service_unavailable", "闲鱼接口暂时异常，请稍后再验证；本次未判定滑块失败。" + suffix, True
+    if "FAIL_SYS_USER_VALIDATE" in codes or "RGV587_ERROR" in codes or extract_token_captcha_url(response):
+        return "verification_pending", "闲鱼接口仍要求安全验证。若页面已提示完成，请稍等后点击「验证结果」；不要重复拖动已通过的滑块。" + suffix, False
+    if "SUCCESS" in codes:
+        return "missing_token", "闲鱼接口返回成功但缺少登录 Token，账号暂未恢复。" + suffix, False
+    return "api_rejected", "闲鱼接口未返回可用 Token，暂不能确认账号已恢复。" + suffix, False
 
 
 def token_failure_message(response: object) -> str:
@@ -135,6 +172,7 @@ class ManualSession:
     initial_url: str = ""
     requested_at: float = 0
     operation_tasks: set = field(default_factory=set)
+    checks: list[str] = field(default_factory=list)
 
 
 class ManualCaptchaManager:
@@ -228,17 +266,61 @@ class ManualCaptchaManager:
         # Deliberately use the official web endpoint: no third-party remote settings
         # and no automatic fallback/retry. An explicit manual action may inspect a
         # paused account. Only confirmed success may reset its retry guard.
+        if session.context is None:
+            raise RuntimeError("验证浏览器会话不可用")
+        url = build_im_token_api_url("web")
+        # Select cookies for the actual API host; unrelated taobao.com cookies
+        # with the same name must never overwrite this request's signing cookie.
+        scoped = await session.context.cookies([url])
+        cookies = self._scoped_cookie_values(scoped)
+        session.cookies = cookies
         result = await request_im_token(
-            cookie_string(session.cookies), session.device_id,
-            api_mode="web", timeout_seconds=20,
+            cookie_string(cookies), session.device_id, api_mode="web", timeout_seconds=20,
+            browser_context=session.context,
         )
-        session.cookies.update(result.response_cookies)
-        if session.context and result.response_cookies:
-            await session.context.add_cookies([
-                {"name": name, "value": value, "domain": ".goofish.com", "path": "/", "secure": True}
-                for name, value in result.response_cookies.items()
-            ])
+        session.cookies = self._scoped_cookie_values(await session.context.cookies([url]))
         return result
+
+    @staticmethod
+    def _scoped_cookie_values(cookies: list[dict]) -> dict:
+        # More specific domain/path wins if the browser has duplicate names.
+        ordered = sorted(cookies, key=lambda c: (len(c.get("path", "/")), len(c.get("domain", ""))))
+        return {cookie["name"]: cookie["value"] for cookie in ordered}
+
+    async def _page_hint(self, session: ManualSession) -> str:
+        if session.page is None:
+            return "unknown"
+        try:
+            text = await session.page.locator("body").inner_text(timeout=1000)
+            if re.search(r"验证通过|验证成功", text):
+                return "page_reports_success"
+            if re.search(r"验证失败|请重试", text):
+                return "page_reports_failure"
+        except Exception:
+            pass
+        return "unknown"
+
+    async def _record_check(self, session: ManualSession, result=None, *, phase="check", error=""):
+        category = verification_outcome(result)[0] if result is not None else error
+        codes = ",".join(token_return_codes(result.response_json)) if result is not None else ""
+        page_hint = await self._page_hint(session)
+        detail = (
+            f"{get_beijing_now_naive():%H:%M:%S} {phase}={session.check_count} "
+            f"result={category} ret={codes or 'none'} "
+            f"http={getattr(result, 'status_code', 0)} "
+            f"duration_ms={int(getattr(result, 'duration_seconds', 0) * 1000)} page={page_hint}"
+        )
+        logger.info(f"【{session.account_id}】手动验证检查 log_id={session.log_id} {detail}")
+        session.checks = (session.checks + [detail])[-6:]
+        try:
+            async with async_session_maker() as db:
+                log = await db.get(YtxRiskControlLog, session.log_id)
+                if log and log.account_identifier == session.account_id and log.processing_status == "processing":
+                    if category != "success":
+                        log.error_message = "\n".join(session.checks)
+                    await db.commit()
+        except Exception:
+            logger.warning(f"【{session.account_id}】验证诊断记录暂时无法保存 log_id={session.log_id}")
 
     async def _open(self, session: ManualSession):
         try:
@@ -252,8 +334,12 @@ class ManualCaptchaManager:
             )
             session.context = await session.browser.new_context(
                 viewport={"width": WIDTH, "height": HEIGHT}, locale="zh-CN",
-                service_workers="block", accept_downloads=False,
+                service_workers="block", accept_downloads=False, user_agent=IM_TOKEN_USER_AGENT,
             )
+            await session.context.add_cookies([
+                {"name": name, "value": value, "domain": ".goofish.com", "path": "/", "secure": True}
+                for name, value in session.cookies.items()
+            ])
 
             async def restrict(route):
                 if allowed_url(route.request.url):
@@ -270,10 +356,6 @@ class ManualCaptchaManager:
                 await self._show_challenge(session, session.initial_url)
             else:
                 await self._load_challenge(session)
-                if session.status == "refresh_required":
-                    # Bounded signing-cookie rotation belongs to opening the page,
-                    # not a CAPTCHA retry. Never repeat it or generate mouse input.
-                    await self.refresh(session)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -282,6 +364,7 @@ class ManualCaptchaManager:
 
     async def _load_challenge(self, session: ManualSession):
         result = await self._probe(session)
+        await self._record_check(session, result, phase="open")
         token = extract_im_access_token(result.response_json)
         if token:
             await self._save_success(session, token, "闲鱼接口已恢复正常，无需滑块验证。")
@@ -299,7 +382,8 @@ class ManualCaptchaManager:
             return
         url = extract_token_captcha_url(result.response_json)
         if not allowed_url(url, challenge=True):
-            await self._finish(session, "failed", token_failure_message(result.response_json))
+            _, message, terminal = verification_outcome(result)
+            await self._finish(session, "failed", message if terminal else token_failure_message(result.response_json))
             return
         await self._show_challenge(session, url)
 
@@ -307,7 +391,7 @@ class ManualCaptchaManager:
         if session.expires_at <= time.time():
             raise HTTPException(410, "验证已超时")
         host = urlsplit(url).hostname
-        cookie_domains = {".goofish.com"}
+        cookie_domains = set()
         if host == "taobao.com" or host.endswith(".taobao.com"):
             cookie_domains.add(".taobao.com")
         await session.context.add_cookies([
@@ -316,7 +400,7 @@ class ManualCaptchaManager:
         ])
         await session.page.goto(url, wait_until="domcontentloaded", timeout=25000)
         session.status = "ready"
-        session.message = "请手动拖动滑块，松开后会检查验证结果；一分钟内未完成将自动跳过。"
+        session.message = "请手动拖动滑块，等待页面提示完成后点击右下角「验证结果」；一分钟内未完成将自动跳过。"
 
     @within_deadline
     async def refresh(self, session: ManualSession) -> dict:
@@ -382,22 +466,24 @@ class ManualCaptchaManager:
             session.last_check = time.time()
             session.check_count += 1
             try:
-                for cookie in await session.context.cookies():
-                    domain = cookie["domain"].lstrip(".")
-                    if any(domain == d or domain.endswith("." + d) for d in OFFICIAL_DOMAINS):
-                        session.cookies[cookie["name"]] = cookie["value"]
                 result = await self._probe(session)
+                await self._record_check(session, result)
                 token = extract_im_access_token(result.response_json)
+                _, message, terminal = verification_outcome(result)
                 if token:
-                    await self._save_success(session, token, "闲鱼接口验证通过，验证结果已保存。")
-                elif session.check_count >= 3:
-                    await self._finish(session, "failed", "三次检查均未通过，已结束本次验证。请先在闲鱼 App 检查账号状态。")
+                    await self._save_success(session, token, message)
+                elif terminal or session.check_count >= 3:
+                    if session.check_count >= 3:
+                        message = "已达到三次接口检查上限，本次验证停止。" + message
+                    await self._finish(session, "failed", message)
                 else:
-                    session.message = "闲鱼接口仍未通过验证。若页面提示过期，请关闭后重新打开；不会自动重试。"
+                    session.message = f"第 {session.check_count}/3 次检查：{message}"
             except HTTPException:
                 raise
-            except Exception:
-                await self._finish(session, "failed", "检查验证结果失败，本次验证已停止，请稍后再试。")
+            except Exception as exc:
+                error = "network_timeout" if "Timeout" in type(exc).__name__ else "request_error"
+                await self._record_check(session, error=error)
+                await self._finish(session, "failed", "检查接口超时或请求异常，无法确认验证结果；本次已停止，未判定滑块失败。")
             return self.describe(session)
 
     async def _save_success(self, session: ManualSession, token: str, message: str):
@@ -437,6 +523,12 @@ class ManualCaptchaManager:
             if log:
                 log.processing_status = "success"
                 log.processing_result = message
+                # A recovered session must not retain an earlier check under
+                # "failure reason"; keep its bounded diagnostics in the detail.
+                log.error_message = None
+                if session.checks:
+                    log.event_description = ((log.event_description or "")
+                                             + "\n接口检查记录：\n" + "\n".join(session.checks))
             if session.queued:
                 await verification_queue._finish(db, account, lease, "success", message)
             account.metadata_json = {**(account.metadata_json or {}), MANUAL_RESUME_KEY: session.id}

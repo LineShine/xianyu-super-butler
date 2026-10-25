@@ -12,8 +12,8 @@ Cookie续期共通服务（接口续期 + 浏览器续期）
 
 续期优先级：接口续期 > 浏览器续期 > 账号密码登录
 
-本模块为纯工具服务，不依赖数据库、不依赖定时任务框架，
-任何需要通过接口续期Cookie的场景都可以直接调用。
+按数据库账号加续期租约，与手动验证互斥；调用方仍负责保存返回的 Cookie。
+不依赖定时任务框架，账号须已存在于数据库。
 """
 from __future__ import annotations
 
@@ -51,6 +51,7 @@ class CookieRenewApiResult:
         renew_method: 最终成功的续期方式（api/browser/none）
         need_password_login: 是否需要执行账号密码登录（接口和浏览器都失败时为True）
         step_details: 各步骤执行详情，记录每一步的状态
+        deferred: 手动验证或其他续期占用账号，本次跳过，不应继续密码登录
     """
 
     success: bool
@@ -61,6 +62,7 @@ class CookieRenewApiResult:
     renew_method: str = "none"  # api / browser / none
     need_password_login: bool = False
     step_details: str = ""
+    deferred: bool = False
 
 
 class CookieRenewApiService:
@@ -76,6 +78,21 @@ class CookieRenewApiService:
     """
 
     async def renew(self, cookies_str: str, account_id: str = "", source: str = "") -> CookieRenewApiResult:
+        from common.services.account_credential_guard import credential_renewal, verification_pending
+
+        account_id = account_id or trans_cookies(cookies_str).get("unb", "")
+        async with credential_renewal(account_id) as acquired:
+            if acquired and not await verification_pending(account_id):
+                result = await self._renew(cookies_str, account_id, source)
+                if not await verification_pending(account_id):
+                    return result
+            return CookieRenewApiResult(
+                success=False, new_cookies_str=cookies_str, deferred=True,
+                api_message="账号正在手动验证或续期，本次后台续期已跳过",
+                need_password_login=False,
+            )
+
+    async def _renew(self, cookies_str: str, account_id: str = "", source: str = "") -> CookieRenewApiResult:
         """执行续期，根据来源和 havana_lgc2_77 字段决定续期顺序。
 
         流程：
@@ -85,7 +102,7 @@ class CookieRenewApiService:
 
         Args:
             cookies_str: 当前完整的Cookie字符串
-            account_id: 账号ID（仅用于日志标识，可为空）
+            account_id: 数据库中的账号ID
             source: 调用来源标识（"scheduled_task"表示定时任务触发）
 
         Returns:

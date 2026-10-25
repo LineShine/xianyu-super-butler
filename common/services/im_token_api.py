@@ -40,6 +40,11 @@ from common.utils.xianyu_utils import generate_sign, trans_cookies
 
 
 IM_TOKEN_API_BASE_URL = "https://h5api.m.goofish.com/h5"
+IM_TOKEN_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/139.0.0.0 Safari/537.36"
+)
 # 远程接口取 Token 超时时的最大尝试次数（首次 + 重试 2 次）；全部超时后才交由上层处理滑块
 REMOTE_TOKEN_TIMEOUT_MAX_ATTEMPTS = 3
 # 远程接口超时重试之间的等待秒数
@@ -127,6 +132,7 @@ async def request_im_token(
     *,
     api_mode: str = DEFAULT_TOKEN_API_MODE,
     timeout_seconds: int = 30,
+    browser_context: Any = None,
 ) -> ImTokenApiResult:
     """调用闲鱼 IM Token API。
 
@@ -135,6 +141,7 @@ async def request_im_token(
         device_id: 本次请求必须使用的 Device ID。
         api_mode: Token 获取方式（网页接口）。
         timeout_seconds: HTTP 请求总超时秒数。
+        browser_context: 手动验证的浏览器上下文，传入时共享其 Cookie 存储。
 
     Returns:
         包含响应 JSON、响应 Cookie、状态码、耗时和本次接口方式的结果。
@@ -190,17 +197,41 @@ async def request_im_token(
         "sec-fetch-dest": "empty",
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-site",
-        "user-agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/139.0.0.0 Safari/537.36"
-        ),
+        "user-agent": IM_TOKEN_USER_AGENT,
         "referer": "https://www.goofish.com/",
         "origin": "https://www.goofish.com",
         "cookie": cookies_str.replace("\n", "").replace("\r", "") if cookies_str else "",
     }
 
     started_at = time.time()
+    if browser_context is not None:
+        # APIRequestContext shares the verification browser's scoped Cookie jar.
+        # Do not flatten cookies from taobao.com/goofish.com into a Cookie header.
+        headers.pop("cookie", None)
+        response = await browser_context.request.post(
+            build_im_token_api_url(normalized_mode), params=params,
+            form={"data": data_value}, headers=headers,
+            timeout=timeout_seconds * 1000, max_redirects=0, max_retries=0,
+        )
+        try:
+            try:
+                response_json = await response.json()
+            except ValueError:
+                # Rate limits and upstream errors may return HTML. Preserve
+                # HTTP status for diagnosis without storing that response body.
+                response_json = {}
+            response_cookies = {}
+            for header in response.headers_array:
+                if header["name"].lower() == "set-cookie" and "=" in header["value"]:
+                    name, value = header["value"].split(";", 1)[0].split("=", 1)
+                    response_cookies[name.strip()] = value.strip()
+            return ImTokenApiResult(
+                response_json=response_json, response_cookies=response_cookies,
+                status_code=response.status, duration_seconds=time.time() - started_at,
+                api_mode=normalized_mode, device_id=device_id,
+            )
+        finally:
+            await response.dispose()
     async with aiohttp.ClientSession() as session:
         async with session.post(
             build_im_token_api_url(normalized_mode),

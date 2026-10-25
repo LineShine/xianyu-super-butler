@@ -1098,13 +1098,21 @@ async def renew_account_login(
 
                 # 调用共通服务执行接口续期
                 renew_result = await cookie_renew_api_service.renew(cookies_str, account_id)
+                from common.services.account_credential_guard import verification_holds_credentials
+                await session.refresh(account, with_for_update=True)
+                if renew_result.deferred or verification_holds_credentials(account) or account.cookie != cookies_str:
+                    await session.rollback()
+                    results.append({"account_id": account_id, "success": False,
+                                    "message": "账号正在手动验证或登录信息已变化，已跳过续期写回"})
+                    failed_count += 1
+                    continue
 
                 # 不管续期是否成功，只要有Cookie字段更新就先写入数据库
                 if renew_result.updated_cookie_names and renew_result.new_cookies_str != cookies_str:
                     account.cookie = renew_result.new_cookies_str
-                    await session.commit()
 
                 if not renew_result.success:
+                    await session.commit()
                     results.append({
                         "account_id": account_id,
                         "account_name": account.account_id,
@@ -1118,7 +1126,9 @@ async def renew_account_login(
                 if account.status != "active":
                     account.status = "active"
                     account.disable_reason = None
-                    await session.commit()
+                # Cookie and enabled state must be written under the same lock;
+                # a queued verification must not be undone between two commits.
+                await session.commit()
 
                 # 通知 WebSocket 服务启动/重启账号任务
                 try:

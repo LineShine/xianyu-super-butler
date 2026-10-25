@@ -193,6 +193,9 @@ async def start_account(account_id: str, request: StartAccountRequest = None):
         from common.services.slider_retry_guard import account_slider_paused, SLIDER_PAUSE_REASON
         if await account_slider_paused(account_id):
             return {"success": False, "code": 409, "message": SLIDER_PAUSE_REASON, "data": None}
+        from common.services.account_credential_guard import verification_pending
+        if await verification_pending(account_id):
+            return {"success": False, "code": 409, "message": "账号正在等待手动验证，暂不启动连接", "data": None}
         from app.services.xianyu.cookie_manager import get_manager
         from loguru import logger
         
@@ -2578,6 +2581,14 @@ async def _execute_password_login_refresh(account_id: str, trigger_reason: str):
 
 
 async def _standalone_password_login(account_id: str, trigger_reason: str) -> dict:
+    from common.services.account_credential_guard import credential_renewal
+    async with credential_renewal(account_id) as acquired:
+        if not acquired:
+            return {"success": False, "code": 409, "message": "账号正在手动验证或续期，已跳过后台登录"}
+        return await _standalone_password_login_guarded(account_id, trigger_reason)
+
+
+async def _standalone_password_login_guarded(account_id: str, trigger_reason: str) -> dict:
     """
     独立执行密码登录（不依赖运行中的实例）
     
@@ -2651,23 +2662,22 @@ async def _standalone_password_login(account_id: str, trigger_reason: str) -> di
             try:
                 from common.services.cookie_renew_api_service import cookie_renew_api_service
                 logger.info(f"【内部API】账号 {account_id} 先尝试接口续期...")
-                # 记录续期前的全量cookies
-                logger.info(f"【{account_id}】[续期前全量Cookies] {cookies_str}")
                 renew_result = await cookie_renew_api_service.renew(cookies_str, account_id)
+                if renew_result.deferred:
+                    return {"success": False, "code": 409, "message": renew_result.api_message}
 
                 # 不管续期是否成功，有Cookie更新就先写库
                 if renew_result.updated_cookie_names:
-                    db_manager.update_cookie_account_info(
+                    saved = db_manager.update_cookie_account_info(
                         account_id,
                         cookie_value=renew_result.new_cookies_str
                     )
+                    if not saved:
+                        return {"success": False, "code": 409, "message": "账号状态已变化，已跳过续期写回"}
                     logger.info(
                         f"【内部API】账号 {account_id} 接口返回Cookie已更新 "
                         f"{len(renew_result.updated_cookie_names)} 个字段"
                     )
-
-                # 记录续期后的全量cookies（不管成功失败都打印）
-                logger.info(f"【{account_id}】[续期后全量Cookies] {renew_result.new_cookies_str or cookies_str}")
 
                 if renew_result.success:
                     renew_method_desc = "接口续期" if renew_result.renew_method == "api" else "浏览器续期"
@@ -2693,6 +2703,9 @@ async def _standalone_password_login(account_id: str, trigger_reason: str) -> di
             except Exception as renew_exc:
                 logger.warning(f"【内部API】账号 {account_id} 续期异常（不影响密码登录）: {renew_exc}")
 
+        from common.services.account_credential_guard import verification_pending
+        if await verification_pending(account_id):
+            return {"success": False, "code": 409, "message": "账号正在等待手动验证，已跳过密码登录"}
         # ====== 续期未成功，继续密码登录流程 ======
         _api_renew_fail_msg = "接口续期和浏览器续期均失败"
         username = account_info.get('username', '')

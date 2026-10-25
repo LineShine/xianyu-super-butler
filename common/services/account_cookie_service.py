@@ -18,6 +18,7 @@ from common.db.session import async_session_maker
 from common.models.ytx_account import YtxAccount
 from common.utils.cookie_refresh import clear_cookie_refresh_snapshot
 from common.utils.xianyu_utils import trans_cookies
+from common.services.account_credential_guard import verification_holds_credentials
 
 
 async def merge_account_cookie_fields(
@@ -69,6 +70,9 @@ async def merge_account_cookie_fields(
                     )
                     return None
 
+                if verification_holds_credentials(account):
+                    logger.info(f"【{account_id}】手动验证期间跳过后台 Cookie 写回")
+                    return None
                 merged_cookies = trans_cookies(account.cookie or "")
                 merged_cookies.update(updates)
                 merged_cookies_str = "; ".join(

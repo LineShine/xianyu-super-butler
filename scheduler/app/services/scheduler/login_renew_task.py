@@ -97,7 +97,7 @@ class LoginRenewTaskService:
                             token_refreshed_count += 1
                         elif status == "session_expired":
                             session_expired_count += 1
-                        else:
+                        elif status != "skipped":
                             failed_count += 1
                             
                     except Exception as e:
@@ -166,6 +166,17 @@ class LoginRenewTaskService:
     async def _renew_account(
         self,
         session: AsyncSession,
+        account: YtxAccount,
+    ) -> tuple[str, Optional[str]]:
+        from common.services.account_credential_guard import credential_renewal
+        async with credential_renewal(account.account_id) as acquired:
+            if not acquired:
+                return "skipped", "账号正在手动验证或续期，本次登录检查已跳过"
+            return await self._renew_account_guarded(session, account)
+
+    async def _renew_account_guarded(
+        self,
+        session: AsyncSession,
         account: YtxAccount
     ) -> tuple[str, Optional[str]]:
         """
@@ -183,6 +194,11 @@ class LoginRenewTaskService:
         try:
             # 调用登录用户接口检查登录状态
             result = await self._fetch_login_user_for_renew(cookies_str, account_id)
+            from common.services.account_credential_guard import verification_holds_credentials
+            await session.refresh(account, with_for_update=True)
+            if verification_holds_credentials(account) or account.cookie != cookies_str:
+                await session.commit()
+                return "skipped", "账号正在手动验证或登录信息已变化，本次续期不写回"
             
             status = result.get("status", "failed")
             message = result.get("message")
@@ -194,8 +210,8 @@ class LoginRenewTaskService:
                 account.metadata_json = clear_cookie_refresh_snapshot(account.metadata_json)
                 account.last_refresh_at = get_beijing_now_naive()
                 session.add(account)
-                await session.commit()
                 logger.info(f"【{self.task_name}】账号 {account_id} Cookie已更新")
+            await session.commit()
             
             # Session过期或令牌为空时触发后台密码登录
             if status in ("session_expired", "token_empty"):

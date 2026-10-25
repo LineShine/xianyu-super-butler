@@ -149,6 +149,10 @@ class CookiesRefreshTaskService:
         await session.refresh(account, with_for_update=True)
         if is_slider_paused(account):
             return
+        from common.services.account_credential_guard import verification_holds_credentials
+        if verification_holds_credentials(account):
+            await session.commit()
+            return
         old_status = account.status
         account.status = "active"
         account.disable_reason = None
@@ -223,6 +227,17 @@ class CookiesRefreshTaskService:
         from common.services.slider_retry_guard import account_slider_paused, is_slider_paused
         if is_slider_paused(account) or await account_slider_paused(account.account_id):
             return CookiesRefreshProcessResult(status="skipped", message="滑块失败保护已暂停账号")
+        from common.services.account_credential_guard import credential_renewal
+        async with credential_renewal(account.account_id) as acquired:
+            if not acquired:
+                return CookiesRefreshProcessResult(status="skipped", message="账号正在手动验证或续期")
+            return await self._process_account_guarded(session, account)
+
+    async def _process_account_guarded(
+        self, session: AsyncSession, account: YtxAccount,
+    ) -> CookiesRefreshProcessResult:
+        from common.services.account_credential_guard import verification_holds_credentials
+        from common.services.slider_retry_guard import is_slider_paused
         now = get_beijing_now_naive()
         schedule = await self._get_schedule(session, account.account_id)
         if not schedule:
@@ -246,11 +261,13 @@ class CookiesRefreshTaskService:
             await session.commit()
             return CookiesRefreshProcessResult(status="failed", message="账号Cookie为空，且无完整Cookie快照，无法执行续期")
 
+        original_cookie = account.cookie
         browser_result = await cookies_refresh_browser_service.refresh_account_cookies(account)
         # A concurrent slider result may have paused this account while the browser ran.
         await session.refresh(account, with_for_update=True)
-        if is_slider_paused(account):
-            return CookiesRefreshProcessResult(status="skipped", message="滑块失败保护已暂停账号")
+        if is_slider_paused(account) or verification_holds_credentials(account) or account.cookie != original_cookie:
+            await session.commit()
+            return CookiesRefreshProcessResult(status="skipped", message="账号已暂停验证或登录信息已变化，本次续期不写回")
         if not browser_result.success:
             schedule.last_status = "failed"
             schedule.last_error_message = browser_result.message[:500]

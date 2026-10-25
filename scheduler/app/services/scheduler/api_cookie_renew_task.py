@@ -43,7 +43,7 @@ _DISABLED_STATUSES = {"inactive", "disabled", "suspended"}
 class ApiCookieRenewResult:
     """单个账号的接口续期处理结果。"""
 
-    status: str  # success / cookie_updated / browser_renewed / failed / need_password_login
+    status: str  # success / cookie_updated / browser_renewed / failed / need_password_login / skipped
     updated_cookie_names: list[str] = field(default_factory=list)
     response_content: str | None = None
     error_message: str | None = None
@@ -98,7 +98,7 @@ class ApiCookieRenewTaskService:
                             browser_renewed_count += 1
                         elif result.status == "need_password_login":
                             need_password_login_count += 1
-                        else:
+                        elif result.status != "skipped":
                             failed_count += 1
 
                         await self._log_result(session, batch_id, account.account_id, result)
@@ -189,6 +189,11 @@ class ApiCookieRenewTaskService:
         account: YtxAccount,
     ) -> None:
         """禁用账号接口续期成功后自动启用，并通知WebSocket服务启动任务。"""
+        from common.services.account_credential_guard import verification_holds_credentials
+        await session.refresh(account, with_for_update=True)
+        if verification_holds_credentials(account):
+            await session.commit()
+            return
         old_status = account.status
         account.status = "active"
         account.disable_reason = None
@@ -247,6 +252,12 @@ class ApiCookieRenewTaskService:
 
         # 调用共通服务执行续期（接口续期 → 浏览器续期）
         renew_result = await cookie_renew_api_service.renew(cookies_str, account_id, source="scheduled_task")
+        from common.services.account_credential_guard import verification_holds_credentials
+        await session.refresh(account, with_for_update=True)
+        if renew_result.deferred or verification_holds_credentials(account) or account.cookie != cookies_str:
+            # Release the row lock without expiring the loaded account list.
+            await session.commit()
+            return ApiCookieRenewResult(status="skipped", error_message="账号状态已变化或正在手动验证，本次续期不写回")
 
         # 仅在 cookies 真正发生变化时更新数据库
         if (
