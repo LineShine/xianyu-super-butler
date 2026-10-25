@@ -1209,13 +1209,13 @@ class DBManagerCompat:
                 stmt = select(YtxCatalogItem).where(
                     YtxCatalogItem.account_pk == account_pk,
                     YtxCatalogItem.item_id == item_id
-                )
+                ).with_for_update().execution_options(populate_existing=True)
                 result = await session.execute(stmt)
                 existing = result.scalars().first()
                 
                 if existing:
                     # 更新商品信息
-                    metadata = existing.metadata_json or {}
+                    metadata = dict(existing.metadata_json or {})
                     if isinstance(item_data, dict):
                         import json
                         metadata['detail'] = json.dumps(item_data, ensure_ascii=False)
@@ -1402,7 +1402,7 @@ class DBManagerCompat:
                 stmt = select(YtxCatalogItem).where(
                     YtxCatalogItem.account_pk == account_pk,
                     YtxCatalogItem.item_id == item_id
-                )
+                ).with_for_update().execution_options(populate_existing=True)
                 result = await session.execute(stmt)
                 item = result.scalars().first()
                 
@@ -1411,7 +1411,7 @@ class DBManagerCompat:
                     return False
                 
                 # 更新metadata_json中的detail字段
-                metadata = item.metadata_json or {}
+                metadata = dict(item.metadata_json or {})
                 metadata['detail'] = item_detail
                 
                 update_stmt = update(YtxCatalogItem).where(

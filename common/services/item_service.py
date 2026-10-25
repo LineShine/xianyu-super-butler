@@ -26,6 +26,7 @@ from common.models.ytx_account import YtxAccount
 from common.models.ytx_catalog_item import YtxCatalogItem
 from common.models.default_reply import DefaultReply
 from common.models.card import Card
+from common.services import code_generation_config
 
 
 class ItemService:
@@ -697,7 +698,9 @@ class ItemService:
             YtxCatalogItem.account_pk == account.id,
             YtxCatalogItem.item_id == item_id,
         )
-        existing_item = (await self.session.execute(stmt)).scalars().first()
+        existing_item = (await self.session.execute(
+            stmt.with_for_update().execution_options(populate_existing=True)
+        )).scalars().first()
 
         if existing_item:
             new_title = item.get("title", "")
@@ -857,7 +860,9 @@ class ItemService:
             YtxCatalogItem.account_pk == account.id,
             YtxCatalogItem.item_id == item_id,
         )
-        item = (await self.session.execute(stmt)).scalars().first()
+        item = (await self.session.execute(
+            stmt.with_for_update().execution_options(populate_existing=True)
+        )).scalars().first()
         if not item:
             return
 
@@ -1004,6 +1009,8 @@ class ItemService:
                 YtxCatalogItem.account_pk == account.id,
                 YtxCatalogItem.item_id == item_id,
             )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         result = await self.session.execute(stmt)
         item = result.scalars().first()
@@ -1176,6 +1183,38 @@ class ItemService:
                 )
         return {"deleted": deleted, "failed": failed}
 
+    async def set_code_generation(self, account: YtxAccount, item_id: str, enabled: bool) -> bool:
+        # Match the command claim lock order: account, then item. Hold only for DB work.
+        owned_account = (await self.session.execute(
+            select(YtxAccount).where(
+                YtxAccount.id == account.id, YtxAccount.owner_id == account.owner_id,
+            ).with_for_update()
+        )).scalars().first()
+        if owned_account is None:
+            return False
+        items = (await self.session.execute(
+            select(YtxCatalogItem).where(
+                YtxCatalogItem.account_pk == account.id,
+                YtxCatalogItem.owner_id == account.owner_id,
+                YtxCatalogItem.item_id == item_id,
+            ).with_for_update().execution_options(populate_existing=True)
+        )).scalars().all()
+        if not items:
+            await self.session.rollback()
+            return False
+        # Legacy catalogs may contain duplicate rows; keep their setting consistent.
+        metadata = code_generation_config.set_enabled(items[0].metadata_json, enabled)
+        for item in items:
+            updated = dict(item.metadata_json or {})
+            updated[code_generation_config.ENABLED_KEY] = enabled
+            if enabled:
+                updated[code_generation_config.ENABLED_AT_KEY] = metadata[code_generation_config.ENABLED_AT_KEY]
+            else:
+                updated.pop(code_generation_config.ENABLED_AT_KEY, None)
+            item.metadata_json = updated
+        await self.session.commit()
+        return True
+
     def _serialize_item(self, item: YtxCatalogItem, account_id: str, default_reply_info: dict | None = None, has_card: bool = False) -> dict:
         metadata = item.metadata_json or {}
         # 从 detail(整块商品JSON) 解析鱼小铺特有字段供界面展示；普通账号无此字段时返回空
@@ -1209,6 +1248,7 @@ class ItemService:
             "is_seller_item": detail_obj.get("source") == "seller",
             "ai_prompt": item.ai_prompt or "",
             "has_ai_prompt": bool(item.ai_prompt),
+            "code_generation_enabled": code_generation_config.enabled(metadata),
             "is_polished": item.is_polished or False,
             "is_multi_spec": metadata.get("is_multi_spec", False),
             "multi_quantity_delivery": metadata.get("multi_quantity_delivery", False),

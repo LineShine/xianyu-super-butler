@@ -19,6 +19,7 @@ from common.schemas.item import (
     ItemBatchOfflineRequest,
     ItemFullFetchRequest,
     ItemPageFetchRequest,
+    ItemCodeGenerationUpdate,
     SellerItemEditRequest,
 )
 from common.services.item_offline_service import batch_offline_items_from_xianyu
@@ -919,6 +920,25 @@ async def update_seller_item(
         logger.error(f"编辑成功后同步商品失败: cookie_id={cookie_id}, item_id={item_id}, error={exc}")
         message = f"{message}，但商品同步失败：{exc}，请手动刷新商品列表"
     return ApiResponse(success=True, message=message)
+
+
+@items_router.put("/{cookie_id}/{item_id}/code-generation", response_model=ApiResponse)
+async def update_item_code_generation(
+    cookie_id: str,
+    item_id: str,
+    payload: ItemCodeGenerationUpdate,
+    current_user: User = Depends(deps.get_current_active_user),
+    account_service: AccountService = Depends(deps.get_account_service),
+    item_service: ItemService = Depends(deps.get_item_service),
+) -> ApiResponse:
+    owner_id, _ = resolve_owner_scope(current_user)
+    account = await account_service.get_account_for_user(owner_id, cookie_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在或无权操作")
+    if not await item_service.set_code_generation(account, item_id, payload.enabled):
+        raise HTTPException(status_code=404, detail="商品不存在或不属于该账号")
+    return ApiResponse(success=True, message=f"口令生成已{'开启' if payload.enabled else '关闭'}",
+                       data={"code_generation_enabled": payload.enabled})
 
 
 @items_router.put("/{cookie_id}/{item_id}/multi-quantity-delivery", response_model=ApiResponse)

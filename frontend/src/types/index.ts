@@ -148,6 +148,7 @@ export interface Item {
   has_card?: boolean               // 是否配置了发货卡券
   ai_prompt?: string               // AI提示词
   has_ai_prompt?: boolean          // 是否配置了AI提示词
+  code_generation_enabled?: boolean // 卖家指令生成口令（默认关闭）
   created_at?: string
   updated_at?: string
 }

@@ -450,6 +450,7 @@ async def send_message(
     account_id: str,
     req: SendMessageRequest,
     current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """
     发送文本消息
@@ -458,6 +459,8 @@ async def send_message(
         account_id: 账号ID
         req: 包含 cid（会话ID）、toUserId（对方用户ID）、text（消息内容）
     """
+    if not await _get_owned_chat_account(account_id, current_user, db):
+        return ApiResponse(success=False, message="账号不存在或无权操作")
     try:
         manager = get_im_session_manager()
         client = manager.clients.get(account_id)

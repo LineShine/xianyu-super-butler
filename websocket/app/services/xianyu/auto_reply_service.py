@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loguru import logger
 
 from common.models.ytx_account import YtxAccount
+from app.services.xianyu.code_generation_service import CodeGenerationService, is_seller_command, normalize_id
 from common.models.ytx_keyword_rule import YtxKeywordRule
 from common.models.ytx_catalog_item import YtxCatalogItem
 from common.models.default_reply import DefaultReply, DefaultReplyRecord
@@ -634,7 +635,7 @@ class AutoReplyService:
             # 使用myid判断（参照旧框架）
             myid = getattr(self.xianyu_instance, 'myid', self.cookie_id)
             self._merge_log_context(log_payload, myid=myid)
-            if send_user_id == myid:
+            if normalize_id(send_user_id) == normalize_id(myid):
                 raw_message = parsed_message.get("raw_message") or {}
                 message_body = raw_message.get("1", {}) if isinstance(raw_message, dict) else {}
                 timestamp_ms = message_body.get("5") if isinstance(message_body, dict) else None
@@ -654,6 +655,14 @@ class AutoReplyService:
                 )
                 if not ai_pause_enabled:
                     pause_manager.pause_chat(chat_id, self.cookie_id)
+                if is_seller_command(parsed_message, myid):
+                    log_payload["reply_strategy"] = "code_generation"
+                    log_payload["matched_rule_type"] = "code_generation"
+                    log_payload["decision_reason"] = "code_error"
+                    # Both native pushes and Web-forwarded pushes reach this same seller branch.
+                    log_payload["_code_generation_log_recorded"] = await CodeGenerationService(
+                        self.cookie_id, self.xianyu_instance,
+                    ).handle(parsed_message, websocket)
                 return
             
             # 2. 检查是否是系统消息（参照旧框架message_handler_core.py）
@@ -967,13 +976,14 @@ class AutoReplyService:
                 # 取出待检测的发送 (future, mid)（临时键，不写入数据库）
                 pending_send_waiters = log_payload.pop("_pending_send_waiters", None)
                 ai_pause_log_recorded = log_payload.pop("_manual_reply_ai_pause_log_recorded", False)
+                code_log_recorded = log_payload.pop("_code_generation_log_recorded", False)
                 # AI 暂停后没有其他规则实际回复时，AI 暂停日志已单独写入，无需重复记录“未匹配规则”。
                 should_skip_final_log = (
                     ai_pause_log_recorded
                     and log_payload.get("decision_reason") == "no_rule_matched"
                     and not pending_send_waiters
                 )
-                log_id = None if should_skip_final_log else await self._record_auto_reply_log(log_payload)
+                log_id = None if (should_skip_final_log or code_log_recorded) else await self._record_auto_reply_log(log_payload)
                 # 若消息已发出且日志写入成功，起后台任务异步等待发送结果并回写状态
                 if log_id and pending_send_waiters:
                     self._spawn_send_status_writeback(log_id, pending_send_waiters)

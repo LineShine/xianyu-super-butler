@@ -11,6 +11,12 @@ import type {
 // API前缀
 const ITEM_PREFIX = '/api/v1/items'
 
+export const updateItemCodeGeneration = (cookieId: string, itemId: string, enabled: boolean) =>
+  put<ApiResponse<{ code_generation_enabled: boolean }>>(
+    `${ITEM_PREFIX}/${encodeURIComponent(cookieId)}/${encodeURIComponent(itemId)}/code-generation`,
+    { enabled },
+  )
+
 export interface FetchItemsSummaryResponse extends ApiResponse {
   total_count?: number
   saved_count?: number

@@ -952,7 +952,7 @@ export function ChatNew() {
       return
     }
 
-    const text = rawText.trim()
+    const text = rawText
     setSending(true)
     try {
       const res = await sendTextMessage(activeAccountId, activeCid, conv.otherUserId, text)

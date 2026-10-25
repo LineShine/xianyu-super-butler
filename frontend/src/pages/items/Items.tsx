@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from 'react'
 import { CheckSquare, Download, Edit2, ExternalLink, Loader2, Package, PackageX, RefreshCw, Search, Square, Trash2, X, Settings, Plus, MessageSquare, Bot, ChevronLeft, ChevronRight, ImagePlus, Unlink, Tag } from 'lucide-react'
 import { batchDeleteItems, batchDeleteXianyuItems, batchOfflineItems, deleteItem, fetchAllItemsFromAccessibleAccounts, fetchAllItemsFromAccount, getItemsPaginated, updateItem, updateItemMultiQuantityDelivery, updateItemMultiSpec, updateItemPrice, getItemDefaultReply, saveItemDefaultReply, deleteItemDefaultReply, batchSaveItemDefaultReply, batchDeleteItemDefaultReply, getItemAiPrompt, saveItemAiPrompt, batchDeleteItemAiPrompt, batchSaveItemAiPrompt, uploadItemDefaultReplyImage, uploadBatchDefaultReplyImage, type ItemFilterParams } from '@/api/items'
 import { getAccountDetails } from '@/api/accounts'
+import { updateItemCodeGeneration } from '@/api/items'
 import { getUserSetting } from '@/api/settings'
 import { batchClearItemRelations } from '@/api/cards'
 import { ItemCardRelationModal } from './ItemCardRelationModal'
@@ -31,6 +32,8 @@ export function Items() {
   const { isAuthenticated, token, _hasHydrated } = useAuthStore()
   const [loading, setLoading] = useState(true)
   const [items, setItems] = useState<Item[]>([])
+  const [codeGenerationBusy, setCodeGenerationBusy] = useState<Set<string>>(new Set())
+  const codeGenerationPending = useRef(new Set<string>())
   const [accounts, setAccounts] = useState<Account[]>([])
   const [selectedAccount, setSelectedAccount] = useState('')
   const [searchKeyword, setSearchKeyword] = useState('')
@@ -531,6 +534,30 @@ export function Items() {
     } finally {
       deletingFromXianyuRef.current = false
       setDeletingFromXianyu(false)
+    }
+  }
+
+  const handleToggleCodeGeneration = async (item: Item) => {
+    const key = `${item.cookie_id}:${item.item_id}`
+    if (!item.cookie_id || codeGenerationPending.current.has(key)) return
+    codeGenerationPending.current.add(key)
+    setCodeGenerationBusy(new Set(codeGenerationPending.current))
+    try {
+      const enabled = !item.code_generation_enabled
+      const result = await updateItemCodeGeneration(item.cookie_id, item.item_id, enabled)
+      if (!result.success) throw new Error(result.message || '保存失败')
+      setItems((current) => current.map((row) =>
+        row.cookie_id === item.cookie_id && row.item_id === item.item_id
+          ? { ...row, code_generation_enabled: result.data?.code_generation_enabled ?? enabled }
+          : row))
+      addToast({ type: 'success', message: enabled
+        ? '口令生成已开启：卖家发送“生成口令”或“口令生成”即可触发'
+        : '口令生成已关闭' })
+    } catch {
+      addToast({ type: 'error', message: '口令生成设置保存失败，请重试' })
+    } finally {
+      codeGenerationPending.current.delete(key)
+      setCodeGenerationBusy(new Set(codeGenerationPending.current))
     }
   }
 
@@ -1516,6 +1543,7 @@ export function Items() {
                   <th className="min-w-[110px] text-center">关联卡券</th>
                   <th className="min-w-[110px] text-center">默认回复</th>
                   <th className="min-w-[110px] text-center">AI提示词</th>
+                  <th className="min-w-[110px] text-center whitespace-nowrap">口令生成</th>
                   <th className="min-w-[170px]">创建时间</th>
                   <th className="min-w-[170px]">更新时间</th>
                   <th className="sticky right-0 bg-slate-50 dark:bg-slate-800 min-w-[70px]">操作</th>
@@ -1524,7 +1552,7 @@ export function Items() {
             <tbody>
               {filteredItems.length === 0 ? (
                 <tr>
-                  <td colSpan={18}>
+                  <td colSpan={19}>
                     <div className="empty-state py-8">
                       <Package className="empty-state-icon" />
                       <p className="text-gray-500">暂无商品数据</p>
@@ -1677,6 +1705,22 @@ export function Items() {
                       >
                         <Bot className="w-3 h-3" />
                         {item.has_ai_prompt ? '已配置' : '未配置'}
+                      </button>
+                    </td>
+                    <td className="text-center">
+                      <button
+                        onClick={() => handleToggleCodeGeneration(item)}
+                        disabled={!item.cookie_id || codeGenerationBusy.has(`${item.cookie_id}:${item.item_id}`)}
+                        aria-label={`口令生成 ${item.item_id}`}
+                        aria-pressed={!!item.code_generation_enabled}
+                        title="开启后，仅卖家发送完整四字指令“生成口令”或“口令生成”时，向同一买家追加口令"
+                        className={`px-2 py-1 rounded text-xs font-medium whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-wait ${
+                          item.code_generation_enabled
+                            ? 'bg-green-100 text-green-700 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-400'
+                            : 'bg-gray-100 text-gray-500 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-400'
+                        }`}
+                      >
+                        {item.code_generation_enabled ? '已开启' : '已关闭'}
                       </button>
                     </td>
                     <td className="text-gray-500 text-xs">

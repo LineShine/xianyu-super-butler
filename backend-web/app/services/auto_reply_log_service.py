@@ -130,6 +130,17 @@ class AutoReplyLogService:
                 start_time=start_time,
                 end_time=end_time,
             )
+            # Command failures must be visible too; do not restrict these logs to success.
+            code_conditions = [YtxAutoReplyMessageLog.reply_strategy == "code_generation"]
+            if owner_id is not None:
+                code_conditions.append(YtxAutoReplyMessageLog.owner_id == owner_id)
+            if account_id:
+                code_conditions.append(YtxAutoReplyMessageLog.account_id == account_id)
+            if start_time is not None:
+                code_conditions.append(YtxAutoReplyMessageLog.created_at >= start_time)
+            if end_time is not None:
+                code_conditions.append(YtxAutoReplyMessageLog.created_at < end_time)
+            branch_conditions = [*branch_conditions, code_conditions]
 
             # 商品 ID 精确筛选对自动回复的所有统计分支统一生效。
             if item_id and item_id.strip():

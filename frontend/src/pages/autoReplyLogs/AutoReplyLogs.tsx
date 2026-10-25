@@ -15,6 +15,7 @@ const REPLY_STRATEGY_LABELS: Record<string, string> = {
   ai: 'AI回复',
   default: '默认回复',
   auto_delivery: '自动发货',
+  code_generation: '口令生成',
 }
 
 const DEFAULT_SCOPE_LABELS: Record<string, string> = {
@@ -34,6 +35,7 @@ const MATCHED_RULE_TYPE_LABELS: Record<string, string> = {
   ai: 'AI回复',
   default_item: '商品默认回复',
   default_account: '账号默认回复',
+  code_generation: '口令生成',
 }
 
 const DECISION_REASON_LABELS: Record<string, string> = {
@@ -55,6 +57,20 @@ const DECISION_REASON_LABELS: Record<string, string> = {
   empty_reply: '回复内容为空',
   default_reply_once: '默认回复仅回复一次',
   manual_reply_ai_paused: '人工回复后暂停 AI',
+  code_sent: '口令发送成功',
+  code_disabled: '商品口令生成已关闭',
+  code_stale: '指令已过期或早于本次开启',
+  code_invalid_time: '指令缺少有效原始时间',
+  code_context: '无法确认唯一商品或买家',
+  code_account_inactive: '账号未启用或已切换',
+  code_script_failed: '口令脚本执行失败',
+  code_script_timeout: '口令脚本执行超时',
+  code_invalid_output: '脚本输出格式不正确',
+  code_send_failed: '口令发送失败',
+  code_send_unknown: '口令发送结果未知（不自动补发）',
+  code_cancelled: '口令任务已取消',
+  code_busy: '会话处理繁忙，请重新发送指令',
+  code_error: '口令处理异常',
 }
 
 function formatDateTime(value?: string | null) {
@@ -120,9 +136,11 @@ const SEND_STATUS_CLASSES: Record<string, string> = {
   paused: 'text-yellow-600 dark:text-yellow-400',
 }
 
-function buildSendStatusLabel(value?: string | null) {
+function buildSendStatusLabel(value?: string | null, log?: AutoReplyLogItem) {
   const key = value || 'unknown'
-  const label = SEND_STATUS_LABELS[key] || key
+  const label = log?.reply_strategy === 'code_generation' && key === 'unknown'
+    ? (log.process_status === 'skipped' ? '未发送' : log.process_status === 'processing' ? '处理中' : '结果未知')
+    : SEND_STATUS_LABELS[key] || key
   const cls = SEND_STATUS_CLASSES[key] || SEND_STATUS_CLASSES.unknown
   return <span className={`font-medium ${cls}`}>{label}</span>
 }
@@ -304,6 +322,7 @@ export function AutoReplyLogs() {
                 >
                   <option value="">全部类型</option>
                   <option value="keyword_item">商品关键词</option>
+                  <option value="code_generation">口令生成</option>
                   <option value="keyword_common">通用关键词</option>
                   <option value="ai">AI回复</option>
                   <option value="default_item">商品默认回复</option>
@@ -414,8 +433,8 @@ export function AutoReplyLogs() {
                           <div className="mt-1 text-xs text-blue-600 dark:text-blue-400 break-all">{log.reply_image_url}</div>
                         ) : null}
                       </td>
-                      <td className="align-top whitespace-nowrap">{buildSendStatusLabel(log.send_status)}</td>
-                      <td className="align-top min-w-[220px] max-w-[320px] whitespace-pre-wrap break-words text-red-600 dark:text-red-400">{renderText(log.send_fail_reason)}</td>
+                      <td className="align-top whitespace-nowrap">{buildSendStatusLabel(log.send_status, log)}</td>
+                      <td className="align-top min-w-[220px] max-w-[320px] whitespace-pre-wrap break-words text-red-600 dark:text-red-400">{renderText(log.send_fail_reason || (log.reply_strategy === 'code_generation' ? log.error_message : null))}</td>
                       <td className="align-top min-w-[180px]">
                         <div>{renderText(log.ai_model_name)}</div>
                         <div className="text-xs text-slate-500 dark:text-slate-400">{renderText(log.ai_provider_name)}</div>

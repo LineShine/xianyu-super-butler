@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+
+
+class ItemCodeGenerationUpdate(BaseModel):
+    enabled: StrictBool
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class ItemTarget(BaseModel):

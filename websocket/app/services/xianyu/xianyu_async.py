@@ -2134,7 +2134,15 @@ class XianyuAsync:
                 # 持有引用仍能拿到结果，避免漏判拦截
                 "send_future": send_future,
             }
+        except asyncio.CancelledError:
+            pending = self._pending_mid_futures.pop(locals().get("registered_mid"), None)
+            if pending is not None and not pending.done():
+                pending.cancel()
+            raise
         except Exception as e:
+            pending = self._pending_mid_futures.pop(locals().get("registered_mid"), None)
+            if pending is not None and not pending.done():
+                pending.cancel()
             logger.error(f"【{self.cookie_id}】发送消息失败: {e}")
             import traceback
             logger.error(f"【{self.cookie_id}】发送消息异常堆栈: {traceback.format_exc()}")
