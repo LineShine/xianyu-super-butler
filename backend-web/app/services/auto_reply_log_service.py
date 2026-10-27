@@ -16,6 +16,7 @@ class AutoReplyLogService:
 
     @staticmethod
     def _serialize_log_row(row) -> dict:
+        context = row.get("context_snapshot") or {}
         return {
             "id": row["id"],
             "owner_id": row["owner_id"],
@@ -49,6 +50,14 @@ class AutoReplyLogService:
             "send_fail_reason": row["send_fail_reason"],
             "created_at": safe_isoformat(row["created_at"]),
             "updated_at": safe_isoformat(row["updated_at"]),
+            "code_generation": ({
+                "entry_source": context.get("entry_source", "seller_manual"),
+                "step": context.get("step"),
+                "quota_used": context.get("quota_used"),
+                "quota_limit": context.get("quota_limit"),
+                "quota_day": context.get("quota_day"),
+                "quota_state": context.get("quota_state"),
+            } if row["reply_strategy"] == "code_generation" else None),
         }
 
     @staticmethod
@@ -226,6 +235,7 @@ class AutoReplyLogService:
                 YtxAutoReplyMessageLog.send_fail_reason.label("send_fail_reason"),
                 YtxAutoReplyMessageLog.created_at.label("created_at"),
                 YtxAutoReplyMessageLog.updated_at.label("updated_at"),
+                YtxAutoReplyMessageLog.context_snapshot.label("context_snapshot"),
             )
             .where(YtxAutoReplyMessageLog.id.in_(log_ids))
             .order_by(

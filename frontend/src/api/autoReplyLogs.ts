@@ -35,6 +35,14 @@ export interface AutoReplyLogItem {
   send_fail_reason: string | null
   created_at: string | null
   updated_at: string | null
+  code_generation?: {
+    entry_source: 'seller_manual' | 'buyer_auto'
+    step?: string | null
+    quota_used?: number | null
+    quota_limit?: number | null
+    quota_day?: string | null
+    quota_state?: string | null
+  } | null
 }
 
 export interface AutoReplyLogListResponse {

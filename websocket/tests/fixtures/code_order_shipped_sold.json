@@ -1,0 +1,21 @@
+{
+  "ret": ["SUCCESS::调用成功"],
+  "data": {
+    "module": {
+      "items": [
+        {
+          "commonData": {
+            "orderId": 1000000000000000001,
+            "itemId": 3001,
+            "orderStatus": "已发货",
+            "inRefund": false
+          },
+          "buyerInfoVO": {"buyerId": 2001},
+          "priceVO": {"refundFee": "0.00"}
+        }
+      ],
+      "nextPage": false,
+      "totalCount": 1
+    }
+  }
+}

@@ -551,7 +551,7 @@ export function Items() {
           ? { ...row, code_generation_enabled: result.data?.code_generation_enabled ?? enabled }
           : row))
       addToast({ type: 'success', message: enabled
-        ? '口令生成已开启：卖家发送“生成口令”或“口令生成”即可触发'
+        ? '口令生成已开启：支持卖家指令及买家验单自助领取，每单每天最多自动领取3次'
         : '口令生成已关闭' })
     } catch {
       addToast({ type: 'error', message: '口令生成设置保存失败，请重试' })
@@ -1713,7 +1713,7 @@ export function Items() {
                         disabled={!item.cookie_id || codeGenerationBusy.has(`${item.cookie_id}:${item.item_id}`)}
                         aria-label={`口令生成 ${item.item_id}`}
                         aria-pressed={!!item.code_generation_enabled}
-                        title="开启后，仅卖家发送完整四字指令“生成口令”或“口令生成”时，向同一买家追加口令"
+                        title="开启后，卖家可发送“生成口令”或“口令生成”；买家询问“口令”可在5分钟内提供纯数字订单号自助领取，验单通过后发放。每单每天最多自动领取3次，间隔5分钟。"
                         className={`px-2 py-1 rounded text-xs font-medium whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-wait ${
                           item.code_generation_enabled
                             ? 'bg-green-100 text-green-700 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-400'

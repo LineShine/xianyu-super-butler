@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from app.api import deps
@@ -43,6 +43,7 @@ class ManualCaptchaInput(BaseModel):
     y: float = Field(default=0, ge=0, le=560, allow_inf_nan=False)
     delta: float = Field(default=0, ge=-560, le=560, allow_inf_nan=False)
     key: Literal["Tab", "Shift+Tab", "Enter", "Space", "ArrowLeft", "ArrowRight"] = "Tab"
+    time_ms: float | None = Field(default=None, ge=0, le=120000, allow_inf_nan=False)
 
 
 class ManualCaptchaInputs(BaseModel):
@@ -82,11 +83,24 @@ async def manual_verification_queue(
 
 @router.post("/risk-control-logs/manual-verification/queue/claim")
 async def claim_manual_verification(
-    payload: ManualCaptchaClaim,
+    payload: ManualCaptchaClaim, request: Request,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> dict:
+    from app.services.manual_captcha_service import manual_captcha_manager, native_window_available
+    return {"success": True, "data": await manual_captcha_manager.claim(
+        current_user, payload.client_id,
+        native_window=native_window_available(request.client.host if request.client else ""),
+    )}
+
+
+@router.post("/risk-control-logs/manual-verification/{session_id}/focus")
+async def focus_manual_verification(
+    session_id: str,
     current_user: User = Depends(deps.get_current_active_user),
 ) -> dict:
     from app.services.manual_captcha_service import manual_captcha_manager
-    return {"success": True, "data": await manual_captcha_manager.claim(current_user, payload.client_id)}
+    session = await manual_captcha_manager.access(session_id, current_user)
+    return {"success": True, "data": await manual_captcha_manager.focus(session)}
 
 
 @router.get("/risk-control-logs/manual-verification/{session_id}")

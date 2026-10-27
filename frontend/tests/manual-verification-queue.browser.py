@@ -38,15 +38,18 @@ createRoot(document.getElementById('root')!).render(<React.StrictMode><MemoryRou
 <Route path="/items" element={<h1>商品测试页</h1>} />
 </Routes></div><ManualVerificationQueue /></MemoryRouter></React.StrictMode>)
 ''')
-    items = ['A', 'B', 'C', 'D', 'E']
+    items = ['A', 'B', 'C', 'D', 'E', 'F']
     deadlines, clients = {}, {}
     deleted, checked, inputs, errors = [], [], [], []
+    focused = []
     svg = '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="560"><rect width="900" height="560" fill="#f1f5f9"/><text x="450" y="260" text-anchor="middle" font-size="24" fill="#475569">测试画面（不连接闲鱼）</text><rect x="80" y="340" width="740" height="50" rx="8" fill="#e2e8f0"/></svg>'
     image = 'data:image/svg+xml;base64,' + base64.b64encode(svg.encode()).decode()
     def session(key):
         return dict(session_id=key, account_id=key, status='success' if key in checked else 'ready',
                     message='验证通过，账号已自动启用，正在恢复连接' if key in checked else '测试队列等待人工操作',
-                    width=900, height=560, expires_at=deadlines[key], image=image)
+                    width=900, height=560, expires_at=deadlines[key],
+                    interaction_mode='native' if key == 'F' else 'embedded',
+                    **({} if key == 'F' else {'image': image}))
 
     async def api(route):
         request = route.request
@@ -73,6 +76,10 @@ createRoot(document.getElementById('root')!).render(<React.StrictMode><MemoryRou
             data = session(key)
         elif path.endswith('/input'):
             inputs.extend(request.post_data_json['events'])
+        elif path.endswith('/focus'):
+            key = path.split('/')[-2]
+            focused.append(key)
+            data = session(key)
         else:
             key = path.rsplit('/', 1)[-1]
             data = session(key)
@@ -126,10 +133,24 @@ createRoot(document.getElementById('root')!).render(<React.StrictMode><MemoryRou
             assert checked == ['E'], checked
             assert [e['kind'] for e in inputs][0] == 'down'
             assert [e['kind'] for e in inputs][-1] == 'up'
-            await expect(page.get_by_role('dialog')).to_have_count(0, timeout=6000)
+            timestamps = [e['time_ms'] for e in inputs]
+            assert timestamps == sorted(timestamps), timestamps
+            assert timestamps[-1] > timestamps[0], 'Human input intervals must be transmitted'
+            await expect(page.get_by_role('dialog').get_by_text('测试账号 F', exact=False)).to_be_visible(timeout=6000)
             assert 'E' in deleted
+            await expect(page.get_by_text('请在独立浏览器窗口的官网消息页完成验证', exact=True)).to_be_visible()
+            await expect(page.get_by_alt_text('可手动操作的闲鱼验证页面')).to_have_count(0)
+            input_count = len(inputs)
+            await page.get_by_role('button', name='显示验证窗口', exact=True).click()
+            await expect(page.get_by_role('button', name='显示验证窗口', exact=True)).to_be_enabled()
+            assert focused == ['F']
+            assert checked == ['E'] and len(inputs) == input_count
+            await page.screenshot(path='/tmp/yutaixian-manual-verification-native.png')
+            await page.get_by_role('button', name='验证结果', exact=True).click()
+            await expect(page.get_by_role('dialog')).to_have_count(0, timeout=6000)
+            assert checked == ['E', 'F'] and 'F' in deleted
             assert errors == [], errors
-            print('PASS: queue navigation, countdown, close/timeout→next, drag without check, explicit button→success→close')
+            print('PASS: queue navigation, countdown, close/timeout→next, drag without check, native window UI/focus, explicit button→success→close')
             print('Screenshot: /tmp/yutaixian-manual-verification-queue.png')
             await browser.close()
     finally:

@@ -8,7 +8,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import os
 import re
+import sys
 import time
 import uuid
 from functools import wraps
@@ -17,8 +19,11 @@ from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.mysql import insert
+
+from app.services.manual_captcha_diagnostics import VerificationDiagnostics
+from app.services.official_token_observer import OfficialTokenObserver
 
 from common.db.session import async_session_maker
 from common.models.risk_control_log import YtxRiskControlLog
@@ -26,7 +31,7 @@ from common.models.token_cache import TokenCache
 from common.models.ytx_account import YtxAccount
 from common.services.captcha.token_response import extract_token_captcha_url, is_token_expired_response
 from common.services.im_token_api import (
-    IM_TOKEN_USER_AGENT, build_im_token_api_url, extract_im_access_token, request_im_token,
+    build_im_token_api_url, extract_im_access_token, request_im_token,
 )
 from common.utils.auth_scope import resolve_owner_scope
 from common.services import manual_verification_queue as verification_queue
@@ -42,6 +47,16 @@ RESOURCE_DOMAINS = OFFICIAL_DOMAINS + (
     "alicdn.com", "aliyun.com", "aliyuncs.com", "mmstat.com", "alibaba.com",
     "alipay.com", "tbcdn.cn",
 )
+# Captcha 1.0 also loads resources outside the domains above. Keep these
+# exact: aliapp.org itself can contain unrelated application subdomains.
+# https://help.aliyun.com/zh/captcha/captcha1-0/support/faq-about-the-web-frontend
+CAPTCHA_RESOURCE_HOSTS = frozenset({"ynuf.aliapp.org", "us.ynuf.aliapp.org"})
+
+
+def native_window_available(client_host: str) -> bool:
+    return (os.environ.get("LOCAL_STACK_MANAGED") == "1"
+            and sys.platform in ("darwin", "win32")
+            and client_host in ("127.0.0.1", "::1"))
 
 
 def allowed_url(url: str, *, challenge: bool = False) -> bool:
@@ -53,11 +68,20 @@ def allowed_url(url: str, *, challenge: bool = False) -> bool:
         return (
             parsed.scheme == "https" and parsed.port in (None, 443)
             and not parsed.username and not parsed.password
-            and any(host == d or host.endswith("." + d) for d in domains)
+            and (any(host == d or host.endswith("." + d) for d in domains)
+                 or (not challenge and host in CAPTCHA_RESOURCE_HOSTS))
             and (not challenge or any(p in parsed.path for p in ("punish", "captcha", "validate")))
         )
     except ValueError:
         return False
+
+
+async def restrict_verification_request(route, diagnostics: VerificationDiagnostics):
+    if allowed_url(route.request.url):
+        await route.continue_()
+    else:
+        diagnostics.blocked(route.request)
+        await route.abort()
 
 
 def cookie_string(cookies: dict) -> str:
@@ -162,6 +186,14 @@ class ManualSession:
     init_task: asyncio.Task | None = None
     expiry_task: asyncio.Task | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    screenshot_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    diagnostics: VerificationDiagnostics = field(default_factory=VerificationDiagnostics)
+    browser_user_agent: str = ""
+    interaction_mode: str = "embedded"
+    official_observer: OfficialTokenObserver | None = None
+    official_recorded_generation: int = 0
+    last_input_time_ms: float | None = None
+    last_input_dispatched: float = 0
     interactions: int = 0
     check_count: int = 0
     last_check: float = 0
@@ -182,7 +214,7 @@ class ManualCaptchaManager:
         self.worker_id = uuid.uuid4().hex
         self.recovery_tasks: set[asyncio.Task] = set()
 
-    async def claim(self, user, client_id: str) -> dict:
+    async def claim(self, user, client_id: str, *, native_window: bool = False) -> dict:
         async with self.start_lock:
             data = await verification_queue.advance(user=user, client_id=client_id, claim_request=True, worker_id=self.worker_id)
             claim = data.pop("claim", None)
@@ -198,6 +230,7 @@ class ManualCaptchaManager:
                     device_id=claim["device_id"] or generate_device_id(claim["account_id"]),
                     log_id=claim["log_id"], expires_at=claim["expires_at"],
                     queued=True, initial_url=claim["url"], requested_at=claim["requested_at"],
+                    interaction_mode="native" if native_window else "embedded",
                 )
                 async with async_session_maker() as db:
                     account = await db.get(YtxAccount, session.account_pk)
@@ -260,6 +293,7 @@ class ManualCaptchaManager:
             "width": WIDTH, "height": HEIGHT,
             "expires_at": session.expires_at,
             "sequence": session.sequence,
+            "interaction_mode": session.interaction_mode,
         }
 
     async def _probe(self, session: ManualSession):
@@ -276,7 +310,7 @@ class ManualCaptchaManager:
         session.cookies = cookies
         result = await request_im_token(
             cookie_string(cookies), session.device_id, api_mode="web", timeout_seconds=20,
-            browser_context=session.context,
+            browser_context=session.context, browser_user_agent=session.browser_user_agent,
         )
         session.cookies = self._scoped_cookie_values(await session.context.cookies([url]))
         return result
@@ -288,17 +322,59 @@ class ManualCaptchaManager:
         return {cookie["name"]: cookie["value"] for cookie in ordered}
 
     async def _page_hint(self, session: ManualSession) -> str:
-        if session.page is None:
-            return "unknown"
-        try:
-            text = await session.page.locator("body").inner_text(timeout=1000)
-            if re.search(r"验证通过|验证成功", text):
-                return "page_reports_success"
-            if re.search(r"验证失败|请重试", text):
-                return "page_reports_failure"
-        except Exception:
-            pass
-        return "unknown"
+        await session.diagnostics.observe_page(session.page, official_page=session.official_observer is not None)
+        return session.diagnostics.page_state
+
+    async def _observed_token(self, session: ManualSession):
+        observer = session.official_observer
+        result = observer.result if observer else None
+        if result is not None:
+            generation = observer.generation
+            session.cookies = self._scoped_cookie_values(
+                await session.context.cookies([build_im_token_api_url("web")])
+            )
+            # The official page creates its own IM device. The saved Token and
+            # the resumed WebSocket must use that exact device, not our old one.
+            session.device_id = result.device_id
+            if session.official_recorded_generation != generation:
+                await self._record_check(session, result, phase="official_page")
+                session.official_recorded_generation = generation
+        return result
+
+    async def _load_official_page(self, session: ManualSession):
+        session.official_observer = OfficialTokenObserver()
+        session.official_observer.attach(session.page)
+        session.diagnostics.add("entry=official_message_page token_transport=page_observed")
+        # Let the site's own SDK initialize credentials and handle verification.
+        # No APIRequestContext request, injected SDK call, or replayed challenge.
+        await session.page.goto("https://www.goofish.com/im", wait_until="domcontentloaded", timeout=25000)
+        session.status = "ready"
+        session.message = "请在官网消息页完成登录或安全验证。系统会观察官网返回的登录结果；消息列表正常加载后可点击「验证结果」。"
+        await session.page.bring_to_front()
+
+    @staticmethod
+    def _diagnostic_text(session: ManualSession) -> str:
+        return "\n".join(filter(None, [session.diagnostics.text(), "\n".join(session.checks)]))
+
+    async def _persist_diagnostics(self, session: ManualSession):
+        diagnostics = session.diagnostics
+        async with diagnostics.save_lock:
+            if diagnostics.saved_generation == diagnostics.generation:
+                return
+            generation = diagnostics.generation
+            try:
+                async with async_session_maker() as db:
+                    # A late screenshot may finish after successful verification.
+                    # The status predicate must be evaluated by the database.
+                    await db.execute(update(YtxRiskControlLog).where(
+                        YtxRiskControlLog.id == session.log_id,
+                        YtxRiskControlLog.account_identifier == session.account_id,
+                        YtxRiskControlLog.processing_status == "processing",
+                    ).values(error_message=self._diagnostic_text(session)))
+                    await db.commit()
+                diagnostics.saved_generation = generation
+            except Exception:
+                logger.warning(f"验证诊断暂时无法保存 log_id={session.log_id}")
 
     async def _record_check(self, session: ManualSession, result=None, *, phase="check", error=""):
         category = verification_outcome(result)[0] if result is not None else error
@@ -317,7 +393,7 @@ class ManualCaptchaManager:
                 log = await db.get(YtxRiskControlLog, session.log_id)
                 if log and log.account_identifier == session.account_id and log.processing_status == "processing":
                     if category != "success":
-                        log.error_message = "\n".join(session.checks)
+                        log.error_message = self._diagnostic_text(session)
                     await db.commit()
         except Exception:
             logger.warning(f"【{session.account_id}】验证诊断记录暂时无法保存 log_id={session.log_id}")
@@ -329,12 +405,13 @@ class ManualCaptchaManager:
             ensure_playwright_browser_path()
             session.playwright = await async_playwright().start()
             executable = get_chromium_executable_path()
+            headed = session.interaction_mode == "native"
             session.browser = await session.playwright.chromium.launch(
-                headless=True, **({"executable_path": executable} if executable else {})
+                headless=not headed, **({"executable_path": executable} if executable else {})
             )
             session.context = await session.browser.new_context(
-                viewport={"width": WIDTH, "height": HEIGHT}, locale="zh-CN",
-                service_workers="block", accept_downloads=False, user_agent=IM_TOKEN_USER_AGENT,
+                viewport={"width": 1280 if headed else WIDTH, "height": 800 if headed else HEIGHT}, locale="zh-CN",
+                service_workers="block", accept_downloads=False,
             )
             await session.context.add_cookies([
                 {"name": name, "value": value, "domain": ".goofish.com", "path": "/", "secure": True}
@@ -342,18 +419,20 @@ class ManualCaptchaManager:
             ])
 
             async def restrict(route):
-                if allowed_url(route.request.url):
-                    await route.continue_()
-                else:
-                    await route.abort()
+                await restrict_verification_request(route, session.diagnostics)
 
             await session.context.route("**/*", restrict)
             session.page = await session.context.new_page()
             session.page.set_default_timeout(8000)
-            if session.initial_url and time.time() - session.requested_at < 15:
-                # Use the real challenge captured by the triggering request. Never
-                # call an automatic solver or silently replace an expired challenge.
-                await self._show_challenge(session, session.initial_url)
+            identity = await session.page.evaluate("({userAgent:navigator.userAgent, platform:navigator.platform})")
+            session.browser_user_agent = identity["userAgent"]
+            session.diagnostics.add(
+                f"browser chromium={session.browser.version} platform={identity['platform']} headless={str(not headed).lower()}"
+            )
+            session.diagnostics.attach(session.page)
+            if headed:
+                await self._observe_native_input(session)
+                await self._load_official_page(session)
             else:
                 await self._load_challenge(session)
         except asyncio.CancelledError:
@@ -361,6 +440,46 @@ class ManualCaptchaManager:
         except Exception:
             # Browser exception text can contain the entire signed challenge URL.
             await self._finish(session, "failed", "验证页面打开失败，请检查本机浏览器环境或网络后重试。未自动重试。")
+
+    def _native_activity(self, session: ManualSession, kind: str):
+        if session.interaction_mode != "native" or session.status != "ready":
+            return
+        if kind == "down":
+            session.pressed = True
+            session.interactions += 1
+        elif kind in ("up", "cancel"):
+            session.pressed = False
+        elif kind == "key":
+            session.interactions += 1
+        else:
+            return
+        session.diagnostics.add(f"human_input mode=native event={kind} interaction={session.interactions}")
+
+    async def _observe_native_input(self, session: ManualSession):
+        # Observe genuine user activity only. No generated input, automation
+        # masking or changes to the official verification callbacks.
+        await session.page.expose_binding("__ytxManualActivity", lambda _, kind: self._native_activity(session, kind))
+        await session.page.add_init_script("""(() => {
+            const report = (event, kind) => {
+                if (event.isTrusted) void window.__ytxManualActivity(kind).catch(() => {});
+            };
+            window.addEventListener('pointerdown', event => {
+                if (event.button === 0) report(event, 'down');
+            }, {capture: true, passive: true});
+            window.addEventListener('pointerup', event => report(event, 'up'), {capture: true, passive: true});
+            window.addEventListener('pointercancel', event => report(event, 'cancel'), {capture: true, passive: true});
+            window.addEventListener('keyup', event => {
+                if (['Enter', ' '].includes(event.key)) report(event, 'key');
+            }, {capture: true, passive: true});
+        })();""")
+
+    @within_deadline
+    async def focus(self, session: ManualSession) -> dict:
+        async with session.lock:
+            if session.interaction_mode != "native" or session.status != "ready" or session.page is None:
+                raise HTTPException(409, "当前没有可显示的本机验证窗口")
+            await session.page.bring_to_front()
+            return self.describe(session)
 
     async def _load_challenge(self, session: ManualSession):
         result = await self._probe(session)
@@ -400,7 +519,11 @@ class ManualCaptchaManager:
         ])
         await session.page.goto(url, wait_until="domcontentloaded", timeout=25000)
         session.status = "ready"
-        session.message = "请手动拖动滑块，等待页面提示完成后点击右下角「验证结果」；一分钟内未完成将自动跳过。"
+        if session.interaction_mode == "native":
+            session.message = "请在新打开的浏览器窗口中直接拖动滑块，页面提示完成后回到这里点击「验证结果」。"
+            await session.page.bring_to_front()
+        else:
+            session.message = "请手动拖动滑块，等待页面提示完成后点击右下角「验证结果」；一分钟内未完成将自动跳过。"
 
     @within_deadline
     async def refresh(self, session: ManualSession) -> dict:
@@ -416,14 +539,43 @@ class ManualCaptchaManager:
 
     @within_deadline
     async def snapshot(self, session: ManualSession) -> dict:
-        async with session.lock:
+        # Capturing frames must not hold the input lock and delay a human drag.
+        async with session.screenshot_lock:
             data = self.describe(session)
             if session.status == "ready":
                 try:
-                    shot = await session.page.screenshot(type="jpeg", quality=80, timeout=8000)
-                    data["image"] = "data:image/jpeg;base64," + base64.b64encode(shot).decode("ascii")
+                    shot = None
+                    if session.interaction_mode == "native":
+                        if session.page.is_closed():
+                            await self._finish(session, "cancelled", "本机验证窗口已关闭，该账号保持暂停。")
+                            return self.describe(session)
+                    else:
+                        shot = await session.page.screenshot(type="jpeg", quality=80, timeout=8000)
+                    if session.official_observer is not None:
+                        async with session.lock:
+                            if session.status != "ready":
+                                return self.describe(session)
+                            result = await self._observed_token(session)
+                            token = extract_im_access_token(result.response_json) if result else None
+                            if token:
+                                await self._save_success(session, token, "官网消息登录已确认成功。")
+                                return self.describe(session)
+                    await self._page_hint(session)
+                    await self._persist_diagnostics(session)
+                    if session.status != "ready":
+                        return self.describe(session)
+                    if session.diagnostics.page_state == "page_reports_failure":
+                        code = session.diagnostics.page_error_code
+                        suffix = f"（{code}）" if code else ""
+                        session.message = f"闲鱼页面提示验证失败{suffix}，已记录诊断。可点击验证框重试，或关闭后在闲鱼 App 处理。"
+                    elif session.diagnostics.page_state == "page_reports_success":
+                        session.message = "闲鱼页面提示验证通过，请点击右下角「验证结果」确认账号是否已恢复。"
+                    data = self.describe(session)
+                    if shot is not None:
+                        data["image"] = "data:image/jpeg;base64," + base64.b64encode(shot).decode("ascii")
                 except Exception:
-                    await self._finish(session, "failed", "验证页面已关闭或无法显示，请关闭窗口后重试。")
+                    if session.status == "ready":
+                        await self._finish(session, "failed", "验证页面已关闭或无法显示，请关闭窗口后重试。")
                     data = self.describe(session)
             return data
 
@@ -432,25 +584,46 @@ class ManualCaptchaManager:
         async with session.lock:
             if session.status != "ready":
                 raise HTTPException(409, "当前验证页面不可操作")
+            if session.interaction_mode == "native":
+                raise HTTPException(409, "请直接操作本机验证窗口")
             if sequence <= session.sequence:
                 return {"sequence": session.sequence}
             if sequence != session.sequence + 1:
                 raise HTTPException(409, "操作顺序异常，请关闭窗口后重试")
+            previous = session.last_input_time_ms
             for event in events:
+                captured = getattr(event, "time_ms", None)
+                if captured is not None:
+                    if previous is not None and captured < previous:
+                        raise HTTPException(409, "操作时间顺序异常，请关闭窗口后重试")
+                    previous = captured
+            for event in events:
+                captured = getattr(event, "time_ms", None)
+                if captured is not None and session.last_input_time_ms is not None:
+                    # Preserve the human's sampled intervals; never synthesize
+                    # points, interpolate a path, or compress a delayed batch.
+                    gap = (captured - session.last_input_time_ms) / 1000
+                    wait = gap - (time.monotonic() - session.last_input_dispatched)
+                    if wait > 0:
+                        await asyncio.sleep(wait)
                 if event.kind in ("down", "move", "up"):
                     await session.page.mouse.move(event.x, event.y)
                     if event.kind == "down" and not session.pressed:
                         await session.page.mouse.down()
                         session.pressed = True
                         session.interactions += 1
+                        session.diagnostics.add(f"human_input mode=embedded event=down interaction={session.interactions}")
                     elif event.kind == "up" and session.pressed:
                         await session.page.mouse.up()
                         session.pressed = False
+                        session.diagnostics.add(f"human_input mode=embedded event=up interaction={session.interactions}")
                 elif event.kind == "wheel":
                     await session.page.mouse.wheel(0, event.delta)
                 elif event.kind == "key":
                     await session.page.keyboard.press(event.key)
                     session.interactions += 1
+                session.last_input_time_ms = captured
+                session.last_input_dispatched = time.monotonic()
             session.sequence = sequence
             return {"sequence": sequence}
 
@@ -466,7 +639,13 @@ class ManualCaptchaManager:
             session.last_check = time.time()
             session.check_count += 1
             try:
-                result = await self._probe(session)
+                result = (await self._observed_token(session) if session.official_observer is not None
+                          else await self._probe(session))
+                if result is None:
+                    session.message = "官网尚未返回可用的消息登录结果，请在官网窗口完成登录或验证后再检查。"
+                    if session.check_count >= 3:
+                        await self._finish(session, "failed", session.message + "已达到三次检查上限。")
+                    return self.describe(session)
                 await self._record_check(session, result)
                 token = extract_im_access_token(result.response_json)
                 _, message, terminal = verification_outcome(result)
@@ -526,9 +705,9 @@ class ManualCaptchaManager:
                 # A recovered session must not retain an earlier check under
                 # "failure reason"; keep its bounded diagnostics in the detail.
                 log.error_message = None
-                if session.checks:
+                if self._diagnostic_text(session):
                     log.event_description = ((log.event_description or "")
-                                             + "\n接口检查记录：\n" + "\n".join(session.checks))
+                                             + "\n验证诊断记录：\n" + self._diagnostic_text(session))
             if session.queued:
                 await verification_queue._finish(db, account, lease, "success", message)
             account.metadata_json = {**(account.metadata_json or {}), MANUAL_RESUME_KEY: session.id}
@@ -599,6 +778,14 @@ class ManualCaptchaManager:
                 if log and log.processing_status == "processing":
                     log.processing_status = status
                     log.processing_result = message
+                    if self._diagnostic_text(session):
+                        log.error_message = self._diagnostic_text(session)
+                    await db.commit()
+                elif (log and log.processing_status == "cancelled"
+                      and log.account_identifier == session.account_id and self._diagnostic_text(session)):
+                    # The durable queue may expire this log before browser cleanup.
+                    # Preserve the observed cause without changing its final status.
+                    log.error_message = self._diagnostic_text(session)
                     await db.commit()
         finally:
             await self._close_browser(session)
@@ -606,6 +793,9 @@ class ManualCaptchaManager:
                 await verification_queue.finish(session.account_id, session.id, status, message)
 
     async def _close_browser(self, session: ManualSession):
+        if session.official_observer is not None:
+            await session.official_observer.close()
+        await session.diagnostics.close()
         for attr, method in (("context", "close"), ("browser", "close"), ("playwright", "stop")):
             resource = getattr(session, attr)
             if resource:

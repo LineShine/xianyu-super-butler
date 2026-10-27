@@ -26,6 +26,7 @@ from loguru import logger
 
 from common.models.ytx_account import YtxAccount
 from app.services.xianyu.code_generation_service import CodeGenerationService, is_seller_command, normalize_id
+from app.services.xianyu.code_self_service import CodeSelfService
 from common.models.ytx_keyword_rule import YtxKeywordRule
 from common.models.ytx_catalog_item import YtxCatalogItem
 from common.models.default_reply import DefaultReply, DefaultReplyRecord
@@ -646,6 +647,17 @@ class AutoReplyService:
                     log_payload["decision_reason"] = "automatic_message_echo"
                     logger.info(f"【{self.cookie_id}】自动消息回传，保持自动回复启用: chat_id={chat_id}")
                     return
+                if is_seller_command(parsed_message, myid) and timestamp_ms:
+                    from app.services.xianyu.code_generation_service import original_timestamp
+                    original_ms = original_timestamp(parsed_message)
+                    if original_ms:
+                        async with async_session_maker() as session:
+                            automatic = await CodeGenerationService(self.cookie_id, self.xianyu_instance)._is_recorded_automatic_echo(
+                                session, parsed_message, original_ms)
+                        if automatic:
+                            log_payload['process_status'] = 'skipped'
+                            log_payload['decision_reason'] = 'automatic_message_echo'
+                            return
                 # 手动发出消息。启用 AI 专用暂停时，仅暂停同买家同商品的 AI；
                 # 未启用时保留原有按会话暂停全部自动回复的行为。
                 log_payload["process_status"] = "skipped"
@@ -705,6 +717,12 @@ class AutoReplyService:
                     )
                 return
             
+            # Buyer self-service owns its waiting messages before AI delay, filters and pause rules.
+            # System/payment events above keep their existing handlers.
+            if await CodeSelfService(self.cookie_id, self.xianyu_instance).handle(parsed_message, websocket):
+                log_payload['_code_generation_log_recorded'] = True
+                return
+
             # 4. 检查商品是否属于当前账号
             # 只有商品ID存在时才检查归属，商品ID不存在则继续执行原有逻辑
             if item_id:

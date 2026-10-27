@@ -1,0 +1,33 @@
+{
+  "ret": ["SUCCESS::调用成功"],
+  "data": {
+    "seller": true,
+    "orderId": "1000000000000000001",
+    "peerUserId": "2001",
+    "itemId": "3001",
+    "status": 3,
+    "components": [
+      {
+        "render": "orderStatusVO",
+        "data": {
+          "orderStatusInfo": {"title": "已发货，待买家确认收货"},
+          "orderStatusNodeList": [
+            {"title": "已拍下", "completed": true},
+            {"title": "已付款", "completed": true},
+            {"title": "已发货", "completed": true},
+            {"title": "待收货", "completed": false},
+            {"title": "待评价", "completed": false}
+          ]
+        }
+      },
+      {
+        "render": "orderInfoVO",
+        "data": {
+          "orderInfoList": [
+            {"title": "订单编号", "value": "1000000000000000001", "copyable": true}
+          ]
+        }
+      }
+    ]
+  }
+}

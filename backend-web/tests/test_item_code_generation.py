@@ -134,3 +134,17 @@ class ItemCodeGenerationTests(unittest.IsolatedAsyncioTestCase):
         rows, count = await service.list_logs(owner_id=1, send_status='failed')
         self.assertEqual(count, 1)
         self.assertEqual(rows[0]['id'], 1)
+
+    async def test_self_service_log_summary_is_scoped_and_does_not_expose_raw_context(self):
+        self.db.add(ReplyLog(id=10, owner_id=1, account_id='1001', chat_id='chat', sender_user_id='2001',
+            order_no='3316963513050017696', reply_strategy='code_generation', matched_rule_type='code_generation',
+            process_status='failed', decision_reason='code_send_unknown', send_status='unknown',
+            context_snapshot={'entry_source': 'buyer_auto', 'step': 'sending', 'quota_used': 2,
+                'quota_limit': 3, 'quota_day': '2026-10-26', 'quota_state': 'unknown', 'private_field': 'not-public'}))
+        self.db.commit()
+        rows, count = await AutoReplyLogService(self.session).list_logs(owner_id=1, matched_rule_type='code_generation')
+        self.assertEqual(count, 1)
+        self.assertEqual(rows[0]['code_generation']['entry_source'], 'buyer_auto')
+        self.assertEqual(rows[0]['code_generation']['quota_used'], 2)
+        self.assertEqual(rows[0]['order_no'], '3316963513050017696')
+        self.assertNotIn('private_field', rows[0]['code_generation'])

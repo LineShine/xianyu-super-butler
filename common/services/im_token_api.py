@@ -62,6 +62,31 @@ def build_im_token_api_url(api_mode: str = DEFAULT_TOKEN_API_MODE) -> str:
     return f"{IM_TOKEN_API_BASE_URL}/{get_token_api_name(api_mode)}/1.0/"
 
 
+def build_im_token_request(
+    cookies: dict[str, str], device_id: str, api_mode: str = DEFAULT_TOKEN_API_MODE,
+) -> tuple[dict[str, str], str]:
+    """Build raw MTOP parameters and the exact JSON string covered by the signature.
+
+    HTTP clients perform URL/form encoding. Do not copy encoded query values or
+    security/tracking placeholders from a captured browser request. The official
+    lib-mtop 2.7.3 SDK still sends jsv=2.7.2; that is not a version typo.
+    """
+    timestamp = str(int(time.time() * 1000))
+    data_value = json.dumps(
+        {"appKey": "444e9908a51d1cb236a27862abc769c9", "deviceId": device_id or ""},
+        ensure_ascii=False, separators=(",", ":"),
+    )
+    signing_token = cookies.get("_m_h5_tk", "").split("_", 1)[0]
+    params = {
+        "jsv": "2.7.2", "appKey": "34839810", "t": timestamp,
+        "sign": generate_sign(timestamp, signing_token, data_value),
+        "v": "1.0", "type": "originaljson", "accountSite": "xianyu",
+        "dataType": "json", "timeout": "20000", "api": get_token_api_name(api_mode),
+        "sessionOption": "AutoLoginOnly",
+    }
+    return params, data_value
+
+
 @dataclass(frozen=True, slots=True)
 class ImTokenApiResult:
     """IM Token API 的原始请求结果。"""
@@ -133,6 +158,7 @@ async def request_im_token(
     api_mode: str = DEFAULT_TOKEN_API_MODE,
     timeout_seconds: int = 30,
     browser_context: Any = None,
+    browser_user_agent: str | None = None,
 ) -> ImTokenApiResult:
     """调用闲鱼 IM Token API。
 
@@ -142,6 +168,7 @@ async def request_im_token(
         api_mode: Token 获取方式（网页接口）。
         timeout_seconds: HTTP 请求总超时秒数。
         browser_context: 手动验证的浏览器上下文，传入时共享其 Cookie 存储。
+        browser_user_agent: 当前验证浏览器实际使用的 UA，不伪造系统或版本。
 
     Returns:
         包含响应 JSON、响应 Cookie、状态码、耗时和本次接口方式的结果。
@@ -152,37 +179,7 @@ async def request_im_token(
         ValueError: 响应无法解析为 JSON。
     """
     normalized_mode = normalize_token_api_mode(api_mode)
-    api_name = get_token_api_name(normalized_mode)
-    timestamp = str(int(time.time() * 1000))
-    params = {
-        "jsv": "2.7.2",
-        "appKey": "34839810",
-        "t": timestamp,
-        "sign": "",
-        "v": "1.0",
-        "type": "originaljson",
-        "accountSite": "xianyu",
-        "dataType": "json",
-        "timeout": "20000",
-        "api": api_name,
-        "sessionOption": "AutoLoginOnly",
-        "dangerouslySetWindvaneParams": "%5Bobject%20Object%5D",
-        "smToken": "token",
-        "queryToken": "sm",
-        "sm": "sm",
-        "spm_cnt": "a21ybx.im.0.0",
-        "spm_pre": "a21ybx.home.sidebar.1.4c053da6vYwnmf",
-        "log_id": "4c053da6vYwnmf",
-    }
-    data_value = (
-        '{"appKey":"444e9908a51d1cb236a27862abc769c9","deviceId":"'
-        + device_id
-        + '"}'
-    )
-    cookies = trans_cookies(cookies_str)
-    m_h5_token = cookies.get("_m_h5_tk", "")
-    signing_token = m_h5_token.split("_")[0] if m_h5_token else ""
-    params["sign"] = generate_sign(timestamp, signing_token, data_value)
+    params, data_value = build_im_token_request(trans_cookies(cookies_str), device_id, normalized_mode)
 
     headers = {
         "accept": "application/json",
@@ -208,6 +205,15 @@ async def request_im_token(
         # APIRequestContext shares the verification browser's scoped Cookie jar.
         # Do not flatten cookies from taobao.com/goofish.com into a Cookie header.
         headers.pop("cookie", None)
+        # A manual browser must not inherit the standalone HTTP client's fixed
+        # Windows/Chrome identity. APIRequestContext does not generate browser
+        # client hints, so omit them instead of inventing a platform/version.
+        for name in list(headers):
+            if name.startswith(("sec-ch-", "sec-fetch-")):
+                headers.pop(name)
+        headers.pop("user-agent", None)
+        if browser_user_agent:
+            headers["user-agent"] = browser_user_agent
         response = await browser_context.request.post(
             build_im_token_api_url(normalized_mode), params=params,
             form={"data": data_value}, headers=headers,

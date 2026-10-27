@@ -9,6 +9,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -98,6 +99,11 @@ def is_seller_command(message: dict, seller_id: str) -> bool:
         return False
     if not seller_id or normalize_id(message.get("send_user_id")) != normalize_id(seller_id):
         return False
+    return is_plain_chat_message(message)
+
+
+def is_plain_chat_message(message: dict) -> bool:
+    """Verify the decoded text and envelope; never promote previews, quotes or cards to commands."""
     if message.get("is_plain_text") is not True:
         return False
     raw = message.get("raw_message")
@@ -105,7 +111,7 @@ def is_seller_command(message: dict, seller_id: str) -> bool:
         return False
     body = raw["1"]
     info = body.get("10", {})
-    if not isinstance(info, dict) or normalize_id(info.get("senderUserId")) != normalize_id(seller_id):
+    if not isinstance(info, dict) or normalize_id(info.get("senderUserId")) != normalize_id(message.get("send_user_id")):
         return False
     if (body.get("conversationType", 1) not in (1, "1") or _has_non_text_content(body)
             or info.get("isAutoReply") or info.get("automatic")):
@@ -117,6 +123,20 @@ def is_seller_command(message: dict, seller_id: str) -> bool:
                 and interpret_content(content)[0] == message["send_message"]
                 and normalize_id(body.get("2")) == normalize_id(message.get("chat_id"))
                 and normalize_id(message.get("chat_id")))
+
+
+@asynccontextmanager
+async def conversation_lock(account_id: str, chat_id: str):
+    """Self-service uses the same locks as manual commands, but never queues buyer submissions."""
+    lock_key = (account_id, normalize_id(chat_id))
+    local = _chat_locks.setdefault(lock_key, asyncio.Lock())
+    if local.locked():
+        yield None
+        return
+    async with local:
+        key = hashlib.sha256(json.dumps(lock_key).encode()).hexdigest()
+        async with distributed_lock(f"code_generation:{key}", expire=90, blocking=False) as lock:
+            yield lock if lock.is_locked else None
 
 
 class CommandStopped(Exception):
@@ -135,6 +155,14 @@ class Claim:
     item_id: str
     enabled_at: int
     timestamp_ms: int
+
+
+@dataclass(frozen=True)
+class SendOutcome:
+    status: str
+    reason: str
+    detail: str | None
+    snapshot: dict
 
 
 async def run_code_script() -> str:
@@ -208,13 +236,7 @@ class CodeGenerationService:
                     try:
                         # The finite pipeline is shorter than the Redis lease. Never retry a claimed command.
                         async with asyncio.timeout(30):
-                            if not await lock.extend():
-                                raise CommandStopped("code_busy", "会话锁已失效，未执行脚本")
-                            code = await run_code_script()
-                            await self._finish(claim.log_id, reply_text=code, reply_mode="text", reply_segments=[code])
-                            if not await lock.extend():
-                                raise CommandStopped("code_busy", "会话锁已失效，已停止发送")
-                            await self._recheck(claim)
+                            code = await self.generate_code(claim, lock)
                             await self._send(claim, code, websocket)
                     except CommandStopped as exc:
                         await self._finish(claim.log_id, process_status="failed", decision_reason=exc.reason,
@@ -236,6 +258,19 @@ class CodeGenerationService:
                 # No committed claim => no script execution. Let the normal reply log record the error.
                 raise
         return True
+
+    async def generate_code(self, claim: Claim, lock, *, record_output: bool = True) -> str:
+        """Internal trusted entry: caller must durably claim and authorize the fixed recipient first."""
+        if not await lock.extend():
+            raise CommandStopped("code_busy", "会话锁已失效，未执行脚本")
+        await self._recheck(claim)
+        code = await run_code_script()
+        if not await lock.extend():
+            raise CommandStopped("code_busy", "会话锁已失效，已停止发送")
+        await self._recheck(claim)
+        if record_output:
+            await self._finish(claim.log_id, reply_text=code, reply_mode="text", reply_segments=[code])
+        return code
 
     async def _claim(self, message: dict, forced_error: CommandStopped | None = None) -> Claim | None:
         chat_id, key = normalize_id(message["chat_id"]), source_key(message)
@@ -361,6 +396,17 @@ class CodeGenerationService:
     async def _is_recorded_automatic_echo(self, session, message, timestamp) -> bool:
         # On restart the in-memory echo tracker is empty. Persisted outgoing reply logs
         # conservatively exclude command-shaped automatic replies near their original send time.
+        from common.models.code_self_service import CodeSelfServiceAttempt
+        # Persist the visible automatic command before dispatch, so even a process crash
+        # cannot turn its echo into a new manual command.
+        automatic = (await session.execute(select(CodeSelfServiceAttempt.id).where(
+            CodeSelfServiceAttempt.account_pk == select(YtxAccount.id).where(
+                YtxAccount.account_id == self.account_id).scalar_subquery(),
+            CodeSelfServiceAttempt.chat_id == normalize_id(message["chat_id"]),
+            CodeSelfServiceAttempt.marker_at_ms.between(timestamp - 10000, timestamp + 10000),
+        ).limit(1))).first()
+        if automatic:
+            return True
         sent_at = datetime.fromtimestamp(timestamp / 1000)
         row = (await session.execute(select(ReplyLog.id).where(
             ReplyLog.account_id == self.account_id,
@@ -390,19 +436,22 @@ class CodeGenerationService:
                    not config.message_allowed(item.metadata_json, claim.timestamp_ms, int(time.time() * 1000)) for item in items):
                 raise CommandStopped("code_stale", "商品已重新开启或指令已过期，未发送口令")
 
-    async def _send(self, claim: Claim, code: str, websocket) -> None:
+    def check_connection(self, websocket) -> None:
         connection = getattr(self.instance, "connection_manager", None)
         if (getattr(self.instance, "ws", websocket) is not websocket
                 or getattr(self.instance, "_registered_ws", websocket) is not websocket
                 or (connection is not None and connection.is_ws_closed(websocket))):
             raise CommandStopped("code_account_inactive", "账号消息连接已断开或发生变化，未发送口令")
-        result = await self.instance.send_msg(websocket, claim.chat_id, claim.buyer_id, code)
+
+    async def send_text_confirmed(self, claim: Claim, text: str, websocket) -> SendOutcome:
+        self.check_connection(websocket)
+        result = await self.instance.send_msg(websocket, claim.chat_id, claim.buyer_id, text)
         result = result if isinstance(result, dict) else {}
         snapshot = {key: value for key, value in result.items() if key != "send_future"}
         future, mid = result.get("send_future"), result.get("mid")
         status, reason, detail = "unknown", "code_send_unknown", "未收到闲鱼明确确认，不会自动补发；请先检查聊天记录"
         try:
-            if result.get("success") is False:
+            if result.get("success") is False and not result.get("delivery_uncertain"):
                 status, reason, detail = "failed", "code_send_failed", result.get("error_message") or "消息发送失败"
             elif future is not None:
                 response = await asyncio.wait_for(asyncio.shield(future), ACK_TIMEOUT)
@@ -423,9 +472,13 @@ class CodeGenerationService:
                     pending.pop(mid, None)
             if future is not None and not future.done():
                 future.cancel()
-        await self._finish(claim.log_id, process_status="success" if status == "success" else "failed",
-                           decision_reason=reason, send_status=status, send_fail_reason=detail,
-                           error_message=detail, send_result_json=snapshot)
+        return SendOutcome(status, reason, detail, snapshot)
+
+    async def _send(self, claim: Claim, code: str, websocket) -> None:
+        outcome = await self.send_text_confirmed(claim, code, websocket)
+        await self._finish(claim.log_id, process_status="success" if outcome.status == "success" else "failed",
+                           decision_reason=outcome.reason, send_status=outcome.status, send_fail_reason=outcome.detail,
+                           error_message=outcome.detail, send_result_json=outcome.snapshot)
 
     async def _finish(self, log_id: int, **values) -> None:
         async with async_session_maker() as session:

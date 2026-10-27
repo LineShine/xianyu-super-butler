@@ -1603,6 +1603,11 @@ class DatabaseInitializer:
             async with init_advisory_lock():
                 with suppress_db_warnings():
                     await self.create_all_tables()
+                    # The self-service ledger must exist before accepting buyer messages.
+                    from common.models.code_self_service import CodeSelfServiceSession, CodeSelfServiceAttempt
+                    async with ddl_connection() as conn:
+                        for model in (CodeSelfServiceSession, CodeSelfServiceAttempt):
+                            await conn.run_sync(lambda sync_conn, table=model.__table__: table.create(sync_conn, checkfirst=True))
                     async with ddl_connection() as conn:
                         await ensure_auto_relist_schema(conn, get_beijing_now_naive())
                     await self.create_default_admin()

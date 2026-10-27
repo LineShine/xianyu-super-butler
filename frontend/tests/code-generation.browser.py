@@ -4,6 +4,7 @@ PYTHONPATH=. backend-web/.venv/bin/python frontend/tests/code-generation.browser
 """
 import asyncio
 import json
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -23,14 +24,15 @@ import { createRoot } from 'react-dom/client'
 import { MemoryRouter, Routes, Route, Link } from 'react-router-dom'
 import { Items } from '/src/pages/items/Items'
 import { ChatNew } from '/src/pages/chat-new/ChatNew'
+import { AutoReplyLogs } from '/src/pages/autoReplyLogs/AutoReplyLogs'
 import { useAuthStore } from '/src/store/authStore'
 import '/src/styles/globals.css'
 import '/src/styles/theme.css'
 import '/src/styles/yutaixian.css'
 useAuthStore.setState({ isAuthenticated: true, _hasHydrated: true, token: 'test-only' })
 createRoot(document.getElementById('root')!).render(<MemoryRouter><div style={{padding: 24}}>
-<nav><Link to="/">商品</Link> | <Link to="/chat">测试聊天</Link></nav>
-<Routes><Route path="/" element={<Items />} /><Route path="/chat" element={<ChatNew />} /></Routes>
+<nav><Link to="/">商品</Link> | <Link to="/chat">测试聊天</Link> | <Link to="/logs">测试回复日志</Link></nav>
+<Routes><Route path="/" element={<Items />} /><Route path="/chat" element={<ChatNew />} /><Route path="/logs" element={<AutoReplyLogs />} /></Routes>
 </div></MemoryRouter>)
 ''')
     enabled, fail_next, writes, sends, errors = False, False, [], [], []
@@ -56,6 +58,15 @@ createRoot(document.getElementById('root')!).render(<MemoryRouter><div style={{p
                 result['data'] = {'code_generation_enabled': enabled}
         elif path == '/api/v1/cookies/options':
             result = [{'pk': 1, 'id': '1001', 'enabled': True, 'remark': '测试卖家'}]
+        elif path == '/api/v1/auto-reply-logs':
+            result = dict(success=True, total=1, total_pages=1, data=[dict(
+                id=1, owner_id=1, account_id='1001', chat_id='4001', sender_user_id='2001',
+                sender_user_name='测试买家', item_id='3001', order_no='3316963513050017696',
+                reply_strategy='code_generation', matched_rule_type='code_generation', reply_mode='text',
+                process_status='failed', decision_reason='code_send_unknown', send_status='unknown',
+                reply_text='口令生成\naB09zZ', error_message='未收到闲鱼明确确认',
+                code_generation=dict(entry_source='buyer_auto', step='finished', quota_used=2,
+                    quota_limit=3, quota_day='2026-10-26', quota_state='unknown'))])
         elif path == '/api/v1/chat-new/accounts':
             result = dict(success=True, data=[account], total=1, hasMore=False)
         elif path.endswith('/connected-accounts'):
@@ -98,6 +109,7 @@ createRoot(document.getElementById('root')!).render(<MemoryRouter><div style={{p
             await page.goto('http://127.0.0.1:9999/tests/.code-generation-fixture.html')
             button = page.get_by_role('button', name='口令生成 3001', exact=True)
             await expect(button).to_have_text('已关闭')
+            await expect(button).to_have_attribute('title', re.compile('买家.*每单每天最多自动领取3次'))
             headers = await page.locator('thead th').all_text_contents()
             assert headers.index('口令生成') == headers.index('AI提示词') + 1
             await button.click()
@@ -120,10 +132,15 @@ createRoot(document.getElementById('root')!).render(<MemoryRouter><div style={{p
                 await page.get_by_role('button', name='发送', exact=True).click()
                 await expect(box).to_have_value('')
                 assert sends[-1] == {'cid': '4001', 'toUserId': '2001', 'text': value}, sends[-1]
+            await page.get_by_role('link', name='测试回复日志').click()
+            await expect(page.get_by_text('口令生成 · 买家自助', exact=True)).to_be_visible()
+            await expect(page.get_by_text('本次额度 2/3', exact=False)).to_be_visible()
+            await expect(page.get_by_text('结果未知，保留占用', exact=False)).to_be_visible()
+            await expect(page.get_by_text('3316963513050017696', exact=True)).to_be_visible()
             assert not errors, errors
             assert not enabled
             await browser.close()
-            print('PASS: column placement, default off, saved state, failure rollback, raw Web text; all network mocked')
+            print('PASS: toggle and self-service help, persistence, raw Web text, self-service log and quota; all network mocked')
     finally:
         HTML.unlink(missing_ok=True)
         ENTRY.unlink(missing_ok=True)

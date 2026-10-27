@@ -5,7 +5,7 @@
 1. Token 刷新、定时续期或在线聊天请求收到闲鱼返回的官方滑块验证链接。
 2. 当前账号暂停并进入手动验证队列。同一账号的并发触发合并为一项，不继续调用自动打码。
 3. Web 在任意页面检测到轮到自己有权限处理的账号后，自动跳转「风控日志」，自动打开手动验证弹窗。
-4. 用户在真实闲鱼页面拖动滑块；松开后自动检查结果，也可点击「检查验证结果」。只有闲鱼 Token 接口确认成功才写回 Cookie 和 Token。
+4. 用户在真实闲鱼页面完成验证。本机窗口观察官网自身的 Token 响应，确认成功后自动恢复；内嵌模式点击「验证结果」才请求 Token。只有闲鱼 Token 接口确认成功才写回 Cookie 和 Token。
 5. 当前项从轮到它开始最多等待 **60 秒**，包含页面加载和检查耗时。弹窗顶部固定显示倒计时，最后 15 秒标红。倒计时归零、点击关闭、跳过或按 Esc 都会关闭当前弹窗并继续下一项；成功或失败也释放队列。
 6. 闲鱼接口确认成功后，自动保存当前账号的验证结果、清空连续失败计数、启用账号并启动连接，无需再手动启用。未完成验证的账号保持暂停，其他账号的正常任务继续。
 
@@ -24,11 +24,14 @@
 
 ## 验证方式
 
-验证画面来自服务端独立浏览器，前端仅转发用户实际鼠标、触摸和有限键盘事件。
+通过本机启动器运行的 macOS/Windows 环境，在本机接管验证时自动打开独立可见浏览器的官网消息页 `https://www.goofish.com/im`。由官网自己的脚本初始化凭据、请求 Token 并展示需要的登录或安全验证。系统只观察精确 Token 接口的响应，不注入 SDK 调用，不用独立 HTTP 客户端构造请求或重放风控链接；也不发送截图或转发鼠标事件。官网返回有效 Token 后，保存当前 Cookie 与官网实际使用的设备 ID，再恢复该账号。网页里的「验证结果」只读取已经观察到的结果，「显示验证窗口」可以将官网窗口置前。关闭任一验证窗口、超时或验证结束都会释放当前会话。
+
+其他部署环境保留内嵌验证画面：画面来自服务端独立浏览器，前端仅转发用户实际鼠标、触摸和有限键盘事件，携带采集时间，后端保留采样点之间的时间间隔。截图使用独立锁，不阻塞鼠标输入。
 不会自动生成滑动轨迹，不调用第三方打码。已配置代理的账号暂不支持此弹窗，会提示到闲鱼 App 完成验证并释放队列。
 
-刚触发的官方链接直接打开；排队后旧链接可能失效，轮到时至多请求一次新页面。
-若闲鱼下发新的签名 Cookie，允许一次凭据更新请求，不无限重试。
+验证浏览器使用其原生 UA、系统和版本，不覆盖为固定 Windows/Chrome 身份。仅内嵌模式仍使用 Playwright `APIRequestContext` 获取新验证链接和检查 Token，共享 Cookie 与原生 UA，但并非官网页面中的 XHR，也不代表两种请求的完整浏览器环境相同。内嵌模式不直接复用后台 HTTP 客户端取得的旧验证链接。
+资源白名单包含阿里云验证码官方列出的 `ynuf.aliapp.org`、`us.ynuf.aliapp.org`，按精确主机名放行 HTTPS 资源；它们不能作为验证页面入口，也不放行整个 `aliapp.org`。缺少这些资源可能导致组件可显示但拖动后校验失败。依据：[阿里云验证码 Web 前端接入 FAQ](https://help.aliyun.com/zh/captcha/captcha1-0/support/faq-about-the-web-frontend)。浏览器回归会经过实际资源策略加载这两个域名的模拟脚本。
+内嵌模式若闲鱼下发新的签名 Cookie，允许用户点击一次凭据更新，不无限重试。本机模式的凭据初始化由官网 SDK 自行处理。
 检查结果至少间隔十秒，三次检查失败即结束本次验证。
 
 验证成功只更新当前账号 Cookie、自动回复 Token 缓存及在线聊天 Token 缓存，并自动恢复该账号。旧的在途失败记录不会再次触发暂停。
@@ -40,11 +43,25 @@
 新手动队列使用 `manual_slider_queue` 事件，状态依次为「排队等待」「处理中」「成功/失败/已取消」。
 它不混入原自动打码成功率，也不计作自动滑块失败。原有三次连续自动失败暂停规则保留。
 
+弹窗自动保存验证码页面提示与 `error:xxxxx` 错误码、验证请求的 HTTP 状态、有限的业务状态码、资源拦截/网络失败、页面脚本异常。即使没有点击「验证结果」，已观察到的失败也会保留在日志中；关闭或超时不会清空原因。诊断最多保留 20 条页面/网络事件及最近一次页面失败，另保留最多 6 次 Token 检查。成功后诊断移入事件描述并清空失败原因。
+
+日志标明浏览器有无窗口，并记录输入开始/结束，以及验证码服务和页面 XHR/fetch 请求的 HTTP 状态，便于关联松手前后的事件。
+`/_____tmd_____/slide` 提交单独标记为 `endpoint=slide`，记录 `result.code` 等受限业务状态字段；HTTP 200 本身不表示滑块通过。`error:xxxxx` 字母数字码没有公开原因映射，不能直接据此认定账号、IP 或拖动轨迹有问题；参见[阿里云线上问题定位与排查](https://help.aliyun.com/zh/captcha/captcha1-0/user-guide/online-troubleshooting)。
+诊断不保存 Cookie、Token、签名 URL、请求体或完整响应；网络记录只保留主机、请求类型和受限状态字段，不保留 URL 路径与参数。页面失败与 Token 检查失败分别记录，页面提示通过不会直接启用账号。
+本机模式的页面文字诊断只读取验证框或验证 iframe，不读取官网消息列表内容。官方 Token 响应仅短暂保留在内存中，严格匹配 HTTPS 主机、接口路径、请求方式和应用标识；关闭会话会取消在途解析并清理响应。
+
+## Token 请求格式
+
+异步 Token 请求和同步链接刷新共用 `build_im_token_request`，先生成 JSON 原文，再对同一原文签名，由 HTTP 客户端执行一次表单编码。不发送抓包中硬编码的 `smToken=token`、`queryToken=sm`、`sm=sm`、历史页面追踪值或提前编码的 `dangerouslySetWindvaneParams`。
+
+2026-10-26 使用[官网 lib-mtop 2.7.3](https://g.alicdn.com/mtb/lib-mtop/2.7.3/mtop.js) 与[官网页面的调用配置](https://g.alicdn.com/idle-pc/xy-site/0.0.179/js/p_layout.js)做了离线请求对照：所有网络请求均拦截为测试响应，只使用虚构 Cookie/设备值。首次普通 H5 Token 请求不包含上述占位参数；SDK 实际发送 `jsv=2.7.2`，因此保留该版本值。此对照证明请求格式存在差异，不能单独证明这些差异就是线上风控拒绝的原因。
+
 ## 代码与验证
 
 - 公共队列：`common/services/manual_verification_queue.py`
 - Token 触发入口：`common/services/im_token_api.py`
 - 会话/真实页面：`backend-web/app/services/manual_captcha_service.py`
+- 官网响应观察：`backend-web/app/services/official_token_observer.py`
 - 全局跳转与弹窗：`frontend/src/components/layout/ManualVerificationQueue.tsx`
 - 弹窗：`frontend/src/components/common/ManualVerificationModal.tsx`
 - 回归测试：`backend-web/tests/test_manual_verification_queue.py`、`backend-web/tests/test_manual_captcha.py`

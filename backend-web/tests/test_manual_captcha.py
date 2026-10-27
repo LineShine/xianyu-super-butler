@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from app.api.routes.risk_control_logs import ManualCaptchaInput, ManualCaptchaInputs
 from app.services.manual_captcha_service import (
     LEASE_KEY, ManualCaptchaManager, ManualSession, allowed_url, check_account, token_failure_message,
-    verification_outcome,
+    verification_outcome, native_window_available,
 )
 from common.models.user import UserRole
 from common.models.ytx_account import YtxAccount
@@ -58,6 +58,92 @@ class ManualCaptchaTests(unittest.IsolatedAsyncioTestCase):
         self.diagnostics = patch.object(ManualCaptchaManager, "_record_check", AsyncMock())
         self.diagnostics.start()
         self.addCleanup(self.diagnostics.stop)
+        self.persist_diagnostics = patch.object(ManualCaptchaManager, "_persist_diagnostics", AsyncMock())
+        self.persist_diagnostics.start()
+        self.addCleanup(self.persist_diagnostics.stop)
+
+    def test_native_window_only_available_on_managed_local_desktop(self):
+        for managed, platform, host, expected in [
+            ("1", "darwin", "127.0.0.1", True),
+            ("1", "win32", "::1", True),
+            ("1", "darwin", "192.168.1.2", False),
+            ("1", "linux", "127.0.0.1", False),
+            ("0", "darwin", "127.0.0.1", False),
+        ]:
+            with (self.subTest(managed=managed, platform=platform, host=host),
+                  patch.dict("os.environ", {"LOCAL_STACK_MANAGED": managed}),
+                  patch("app.services.manual_captcha_service.sys.platform", platform)):
+                self.assertEqual(native_window_available(host), expected)
+
+    async def test_native_activity_requires_ready_window_and_release_before_check(self):
+        manager, active = ManualCaptchaManager(), session()
+        active.interaction_mode = "native"
+        manager._probe = AsyncMock(return_value=SimpleNamespace(
+            response_json={"ret": ["FAIL_SYS_USER_VALIDATE"]}, status_code=200))
+        manager._native_activity(active, "down")
+        self.assertEqual(active.interactions, 0)
+        active.status = "ready"
+        manager._native_activity(active, "down")
+        self.assertTrue(active.pressed)
+        with self.assertRaises(HTTPException):
+            await manager.check(active)
+        manager._probe.assert_not_awaited()
+        manager._native_activity(active, "up")
+        self.assertFalse(active.pressed)
+        self.assertEqual(active.interactions, 1)
+        manager._probe.assert_not_awaited()
+        await manager.check(active)
+        manager._probe.assert_awaited_once()
+        self.assertEqual(active.status, "ready")
+
+    async def test_native_window_rejects_forwarded_mouse_events(self):
+        manager, active = ManualCaptchaManager(), session()
+        active.status, active.interaction_mode, active.page = "ready", "native", AsyncMock()
+        with self.assertRaises(HTTPException) as error:
+            await manager.input(active, 1, [ManualCaptchaInput(kind="down", x=1, y=2)])
+        self.assertEqual(error.exception.status_code, 409)
+        active.page.mouse.move.assert_not_awaited()
+        self.assertEqual(active.interactions, 0)
+
+    async def test_native_snapshot_observes_result_without_screenshot_or_token_request(self):
+        manager, active = ManualCaptchaManager(), session()
+        active.status, active.interaction_mode, active.page = "ready", "native", AsyncMock()
+        active.page.is_closed = Mock(return_value=False)
+        frame = Mock()
+        frame.locator.return_value.inner_text = AsyncMock(return_value="验证通过")
+        active.page.frames = [frame]
+        manager._probe = AsyncMock()
+        result = await manager.snapshot(active)
+        self.assertEqual(result["interaction_mode"], "native")
+        self.assertNotIn("image", result)
+        self.assertIn("验证通过", result["message"])
+        self.assertEqual(active.status, "ready")
+        active.page.screenshot.assert_not_awaited()
+        manager._probe.assert_not_awaited()
+        manager._persist_diagnostics.assert_awaited_once_with(active)
+
+    async def test_closed_native_window_finishes_queue_item(self):
+        manager, active = ManualCaptchaManager(), session()
+        active.status, active.interaction_mode, active.page = "ready", "native", AsyncMock()
+        active.page.is_closed = Mock(return_value=True)
+        async def finish(s, status, message):
+            s.status, s.message = status, message
+        manager._finish = AsyncMock(side_effect=finish)
+        result = await manager.snapshot(active)
+        self.assertEqual(result["status"], "cancelled")
+        self.assertIn("保持暂停", result["message"])
+        manager._finish.assert_awaited_once()
+        active.page.screenshot.assert_not_awaited()
+
+    async def test_focus_only_brings_ready_native_window_to_front(self):
+        manager, active = ManualCaptchaManager(), session()
+        active.status, active.page = "ready", AsyncMock()
+        with self.assertRaises(HTTPException):
+            await manager.focus(active)
+        active.page.bring_to_front.assert_not_awaited()
+        active.interaction_mode = "native"
+        await manager.focus(active)
+        active.page.bring_to_front.assert_awaited_once()
 
     def test_challenge_url_and_resources_are_restricted(self):
         self.assertTrue(allowed_url("https://h5api.m.goofish.com/h5/a/punish?x5secdata=a", challenge=True))
@@ -69,6 +155,17 @@ class ManualCaptchaTests(unittest.IsolatedAsyncioTestCase):
             "https://www.goofish.com/", "https://g.alicdn.com/punish",
         ]:
             self.assertFalse(allowed_url(url, challenge=True), url)
+
+    def test_official_captcha_resource_hosts_are_allowed_without_broadening_navigation(self):
+        # Every resource host in Alibaba's Captcha 1.0 frontend FAQ.
+        for host in ("ynuf.aliapp.org", "us.ynuf.aliapp.org", "cf.aliyun.com",
+                     "cfall.aliyun.com", "g.alicdn.com"):
+            self.assertTrue(allowed_url(f"https://{host}/service/um.js"), host)
+            self.assertFalse(allowed_url(f"https://{host}/punish", challenge=True), host)
+        for url in ("https://aliapp.org/service/um.js", "https://other.aliapp.org/service/um.js",
+                    "https://ynuf.aliapp.org.evil.test/service/um.js", "http://ynuf.aliapp.org/service/um.js",
+                    "https://ynuf.aliapp.org:8189/service/um.js", "https://ynuf.aliapp.org@localhost/service/um.js"):
+            self.assertFalse(allowed_url(url), url)
 
     def test_account_ownership_and_paused_state_required(self):
         account = SimpleNamespace(status="disabled", owner_id=2)
@@ -83,7 +180,8 @@ class ManualCaptchaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.exception.status_code, 409)
 
     def test_input_rejects_unbounded_coordinates_and_arbitrary_keys(self):
-        for fields in ({"x": float("nan")}, {"x": 901}, {"y": -1}, {"key": "Control+L"}):
+        for fields in ({"x": float("nan")}, {"x": 901}, {"y": -1}, {"key": "Control+L"},
+                       {"time_ms": -1}, {"time_ms": float("nan")}, {"time_ms": 120001}):
             with self.assertRaises(ValidationError):
                 ManualCaptchaInput(kind="move", **fields)
         with self.assertRaises(ValidationError):
@@ -146,7 +244,7 @@ class ManualCaptchaTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.services.manual_captcha_service.request_im_token", new=AsyncMock(return_value=result)) as probe:
             await manager._probe(active)
         probe.assert_awaited_once_with("unb=123; _m_h5_tk=old", "device", api_mode="web",
-                                      timeout_seconds=20, browser_context=active.context)
+                                      timeout_seconds=20, browser_context=active.context, browser_user_agent="")
         self.assertEqual(active.cookies["_m_h5_tk"], "new")
         self.assertNotIn("deleted_cookie", active.cookies)
         self.assertEqual(active.context.cookies.await_args.args, (["https://h5api.m.goofish.com/h5/mtop.taobao.idlemessage.pc.login.token/1.0/"],))
@@ -217,6 +315,7 @@ class ManualCaptchaTests(unittest.IsolatedAsyncioTestCase):
     async def test_fresh_challenge_opens_official_page_without_mouse_actions(self):
         manager, active = ManualCaptchaManager(), session()
         active.context, active.page = AsyncMock(), AsyncMock()
+        active.page.frames = []
         url = "https://h5api.m.goofish.com/h5/test/punish?x5secdata=example"
         manager._probe = AsyncMock(return_value=SimpleNamespace(
             response_json={"data": {"url": url}}, response_cookies={},

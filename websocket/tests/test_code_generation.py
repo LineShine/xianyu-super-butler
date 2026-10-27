@@ -24,6 +24,7 @@ from common.models.auto_reply_message_log import YtxAutoReplyMessageLog as Reply
 from common.models.ytx_account import YtxAccount
 from common.models.ytx_catalog_item import YtxCatalogItem
 from common.models.ytx_order import YtxOrder
+from common.models.code_self_service import CodeSelfServiceAttempt, CodeSelfServiceSession
 from common.services.code_generation_config import ENABLED_KEY, ENABLED_AT_KEY
 
 
@@ -40,7 +41,7 @@ def message(mid='5001', text='生成口令', seller='1001', chat='4001', item='3
 class CommandTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.engine = create_engine('sqlite://')
-        for model in (YtxAccount, YtxCatalogItem, ReplyLog, YtxOrder):
+        for model in (YtxAccount, YtxCatalogItem, ReplyLog, YtxOrder, CodeSelfServiceAttempt, CodeSelfServiceSession):
             model.__table__.create(self.engine)
         self.addCleanup(self.engine.dispose)
         self.counter = 100
@@ -71,6 +72,7 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
                     return db.execute(stmt)
                 yield SimpleNamespace(execute=AsyncMock(side_effect=execute), add=add,
                     flush=AsyncMock(side_effect=db.flush), commit=AsyncMock(side_effect=db.commit))
+        self.sessions = sessions
 
         @asynccontextmanager
         async def lock(*args, **kwargs):
@@ -81,6 +83,9 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
             p = patch.object(commands, target, value)
             p.start()
             self.addCleanup(p.stop)
+        p = patch('app.services.xianyu.auto_reply_service.async_session_maker', sessions)
+        p.start()
+        self.addCleanup(p.stop)
         self.instance = self.make_instance('1001')
         self.service = commands.CodeGenerationService('1001', self.instance)
         self.ws = SimpleNamespace(send=AsyncMock())

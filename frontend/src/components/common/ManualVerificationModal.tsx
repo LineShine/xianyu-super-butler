@@ -5,6 +5,7 @@ import { CheckCircle, ExternalLink, Loader2, ShieldAlert, X, XCircle } from 'luc
 import {
   getManualVerification, closeManualVerification,
   checkManualVerification, refreshManualVerification, sendVerificationInput,
+  focusManualVerification,
   type ManualVerificationState, type VerificationInput,
 } from '@/api/manualVerification'
 import { getApiErrorMessage } from '@/utils/request'
@@ -32,6 +33,7 @@ export function ManualVerificationModal({ accountId, accountName, initialState, 
   const sequence = useRef(initialState.sequence || 0)
   const pointer = useRef<number | null>(null)
   const lastMove = useRef(0)
+  const inputStartedAt = useRef(performance.now())
   const checkInProgress = useRef(false)
   const closeRef = useRef(onClose)
   closeRef.current = onClose
@@ -140,7 +142,7 @@ export function ManualVerificationModal({ accountId, accountName, initialState, 
 
   const enqueue = (event: VerificationInput) => {
     if (inputFailed || checking || state?.status !== 'ready') return
-    queue.current.push(event)
+    queue.current.push({ ...event, time_ms: performance.now() - inputStartedAt.current })
     void flush().catch(() => {})
   }
 
@@ -190,6 +192,7 @@ export function ManualVerificationModal({ accountId, accountName, initialState, 
   }
 
   const ready = state?.status === 'ready'
+  const nativeWindow = state?.interaction_mode === 'native'
   const successful = state?.status === 'success'
   const failed = state?.status === 'failed' || state?.status === 'cancelled' || inputFailed
 
@@ -211,7 +214,7 @@ export function ManualVerificationModal({ accountId, accountName, initialState, 
         </div>
         <div className="min-h-0 overflow-y-auto p-5">
           <div className="mb-4 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-800 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-200">
-            请在下方手动拖动滑块，等待闲鱼页面提示完成后，点击右下角「验证结果」。只有点击按钮才会重新获取 Token；确认通过后自动启用账号并恢复连接。每次间隔至少 10 秒，最多检查 3 次；倒计时结束或关闭弹窗会继续下一项。
+            {nativeWindow ? '请在新打开的官网消息页完成登录或安全验证，消息列表加载后回到这里点击「验证结果」。' : '请在下方手动拖动滑块，等待闲鱼页面提示完成后，点击右下角「验证结果」。'}确认通过后自动启用账号并恢复连接。每次检查间隔至少 10 秒，最多检查 3 次；倒计时结束或关闭弹窗会继续下一项。
           </div>
           {error && <div role="alert" className="mb-4 flex items-start gap-2 rounded-xl bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300"><XCircle className="mt-0.5 h-4 w-4 shrink-0" />{error}</div>}
           {state?.status === 'loading' && <div className="flex min-h-[280px] flex-col items-center justify-center gap-4 text-slate-500"><Loader2 className="h-8 w-8 animate-spin" /><p>{state.message}</p></div>}
@@ -221,7 +224,20 @@ export function ManualVerificationModal({ accountId, accountName, initialState, 
               <button onClick={refresh} disabled={busy} className="btn-ios-primary flex items-center gap-2">{busy && <Loader2 className="h-4 w-4 animate-spin" />}继续打开验证</button>
             </div>
           )}
-          {ready && !failed && (
+          {ready && !failed && nativeWindow && (
+            <div className="flex min-h-[230px] flex-col items-center justify-center gap-4 rounded-xl bg-slate-50 p-6 text-center dark:bg-slate-900">
+              <ExternalLink className="h-10 w-10 text-blue-600" />
+              <p className="font-medium text-slate-800 dark:text-slate-100">请在独立浏览器窗口的官网消息页完成验证</p>
+              <p className="text-sm text-slate-500">官网确认消息登录成功后会自动恢复账号。关闭此弹窗也会关闭验证窗口。</p>
+              <button disabled={busy || checking} onClick={async () => {
+                setBusy(true)
+                try { await focusManualVerification(sessionId.current) }
+                catch (reason) { setError(getApiErrorMessage(reason, '无法显示验证窗口')) }
+                finally { setBusy(false) }
+              }} className="btn-ios-primary flex items-center gap-2"><ExternalLink className="h-4 w-4" />显示验证窗口</button>
+            </div>
+          )}
+          {ready && !failed && !nativeWindow && (
             <div className="overflow-hidden rounded-xl border border-slate-200 bg-slate-50 dark:border-slate-600">
               <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-3 py-2 text-xs text-slate-500 dark:border-slate-600 dark:bg-slate-900">
                 <span>闲鱼官方验证页面 · 点击或拖动下方画面</span><span>剩余 {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')}</span>
@@ -256,7 +272,7 @@ export function ManualVerificationModal({ accountId, accountName, initialState, 
           )}
           {successful && <div role="status" className="flex min-h-[230px] flex-col items-center justify-center gap-4 rounded-xl bg-green-50 p-6 text-center text-green-800 dark:bg-green-950/30 dark:text-green-200"><CheckCircle className="h-12 w-12" /><p className="font-medium">{state.message}</p></div>}
           {failed && <div role="alert" className="flex min-h-[230px] flex-col items-center justify-center gap-4 rounded-xl bg-red-50 p-6 text-center text-red-700 dark:bg-red-950/30 dark:text-red-300"><XCircle className="h-12 w-12" /><p>{inputFailed ? '验证连接已中断，请关闭窗口后重新打开。' : state?.message}</p></div>}
-          {ready && !failed && <p role="status" className="mt-3 text-sm leading-6 text-slate-500">{state.message} 如提示链接过期或需要登录，请关闭窗口，稍后重试或在闲鱼 App 处理。</p>}
+          {ready && !failed && <p role="status" className="mt-3 text-sm leading-6 text-slate-500">{state.message}{!nativeWindow && ' 如提示链接过期或需要登录，请关闭窗口，稍后重试或在闲鱼 App 处理。'}</p>}
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-5 py-4 dark:border-slate-700">
           <Link to={`/accounts?account_id=${encodeURIComponent(accountId)}`} onClick={onClose} className="flex items-center gap-1 text-sm text-blue-600">前往账号管理<ExternalLink className="h-3.5 w-3.5" /></Link>

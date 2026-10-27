@@ -12,6 +12,7 @@ export interface ManualVerificationState {
   expires_at: number
   image?: string
   sequence?: number
+  interaction_mode?: 'embedded' | 'native'
 }
 
 export interface VerificationInput {
@@ -20,6 +21,7 @@ export interface VerificationInput {
   y?: number
   delta?: number
   key?: 'Tab' | 'Shift+Tab' | 'Enter' | 'Space' | 'ArrowLeft' | 'ArrowRight'
+  time_ms?: number
 }
 
 type Response = { success: boolean; message?: string }
@@ -40,6 +42,8 @@ export const sendVerificationInput = (sessionId: string, sequence: number, event
   checked(post<Response>(`${PREFIX}/${sessionId}/input`, { sequence, events }, { timeout: 15000 }))
 export const checkManualVerification = (sessionId: string) =>
   checked(post<Result>(`${PREFIX}/${sessionId}/check`, {}, { timeout: 30000 }))
+export const focusManualVerification = (sessionId: string) =>
+  checked(post<Result>(`${PREFIX}/${sessionId}/focus`, {}, { timeout: 5000 }))
 export const refreshManualVerification = (sessionId: string) =>
   checked(post<Result>(`${PREFIX}/${sessionId}/refresh`, {}, { timeout: 60000 }))
 export const closeManualVerification = (sessionId: string) => checked(del<Response>(`${PREFIX}/${sessionId}`, { timeout: 5000 }))

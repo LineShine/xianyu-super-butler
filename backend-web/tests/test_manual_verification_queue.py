@@ -216,12 +216,14 @@ class ClaimTests(unittest.IsolatedAsyncioTestCase):
         with (patch.object(queue, "advance", AsyncMock(side_effect=lambda **kw: self.claim_data())),
               patch("app.services.manual_captcha_service.async_session_maker") as factory):
             factory.return_value.__aenter__.return_value = db
-            result = await manager.claim(user, "tab-one")
+            result = await manager.claim(user, "tab-one", native_window=True)
             again = await manager.claim(user, "tab-one")
             await asyncio.sleep(0)
         self.assertNotIn("claim", result)
         self.assertNotIn("cookie", result["session"])
         self.assertNotIn("url", result["session"])
+        self.assertEqual(result["session"]["interaction_mode"], "native")
+        self.assertEqual(again["session"]["interaction_mode"], "native")
         self.assertEqual(result["session"]["session_id"], again["session"]["session_id"])
         manager._open.assert_awaited_once()
 

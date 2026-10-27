@@ -71,6 +71,34 @@ const DECISION_REASON_LABELS: Record<string, string> = {
   code_cancelled: '口令任务已取消',
   code_busy: '会话处理繁忙，请重新发送指令',
   code_error: '口令处理异常',
+  code_waiting_order: '等待买家提供订单号',
+  code_keyword_cooldown: '询问口令冷却中',
+  code_format_ignored: '已提醒订单号格式，继续等待',
+  code_flow_busy: '本轮正在处理，忽略重复提交',
+  code_order_busy: '该订单正在处理',
+  code_daily_limit: '已达到订单每日领取上限',
+  code_order_cooldown: '订单领取间隔不足5分钟',
+  code_order_query: '订单查询失败',
+  code_order_unknown: '无法确认订单状态',
+  code_order_missing: '订单不存在',
+  code_order_identity: '无法确认订单编号',
+  code_order_seller: '卖家归属不符',
+  code_order_buyer: '买家归属不符',
+  code_order_item: '订单商品不匹配',
+  code_order_unpaid: '订单尚未付款',
+  code_order_closed: '订单已关闭',
+  code_order_refunding: '订单退款处理中',
+  code_order_refunded: '订单已退款或部分退款',
+  code_notice_unknown: '前置消息结果未知，停止后续处理',
+  code_notice_failed: '前置消息发送失败',
+  code_interrupted: '处理已中断，不自动重放',
+}
+
+const CODE_STEP_LABELS: Record<string, string> = {
+  received: '已接收', prompt: '索要订单号', format: '提醒订单号格式', waiting: '等待订单号',
+  validating: '实时验单', order_rejected: '验单未通过', quota_rejected: '领取次数或间隔受限',
+  reserved: '已预留额度', marker: '发送生成指令', scripting: '生成口令', sending: '发送口令',
+  script_failed: '脚本执行失败', finished: '处理结束',
 }
 
 function formatDateTime(value?: string | null) {
@@ -93,6 +121,9 @@ function formatDateTime(value?: string | null) {
 }
 
 function buildStrategyLabel(log: AutoReplyLogItem) {
+  if (log.reply_strategy === 'code_generation') {
+    return log.code_generation?.entry_source === 'buyer_auto' ? '口令生成 · 买家自助' : '口令生成 · 卖家指令'
+  }
   if (log.reply_strategy === 'default' && log.default_reply_scope) {
     return DEFAULT_SCOPE_LABELS[log.default_reply_scope] || `默认回复(${log.default_reply_scope})`
   }
@@ -421,7 +452,17 @@ export function AutoReplyLogs() {
                       </td>
                       <td className="align-top min-w-[180px] break-all">{renderText(log.item_id)}</td>
                       <td className="align-top min-w-[180px] break-all">{renderText(log.order_no)}</td>
-                      <td className="align-top whitespace-nowrap">{buildStrategyLabel(log)}</td>
+                      <td className="align-top whitespace-nowrap">
+                        <div>{buildStrategyLabel(log)}</div>
+                        {log.code_generation?.step && <div className="mt-1 text-xs text-slate-500">
+                          {CODE_STEP_LABELS[log.code_generation.step] || log.code_generation.step}
+                        </div>}
+                        {log.code_generation?.quota_used != null && <div className="mt-1 text-xs text-slate-500">
+                          本次额度 {log.code_generation.quota_used}/{log.code_generation.quota_limit}
+                          {log.code_generation.quota_state === 'released' ? '（已释放）' : log.code_generation.quota_state === 'unknown' ? '（结果未知，保留占用）' : ''}
+                          <div>{log.code_generation.quota_day} · 北京时间</div>
+                        </div>}
+                      </td>
                       <td className="align-top whitespace-nowrap">{buildReplyModeLabel(log.reply_mode)}</td>
                       <td className="align-top min-w-[160px] break-all">{renderText(log.matched_keyword)}</td>
                       <td className="align-top whitespace-nowrap">{buildMatchedRuleTypeLabel(log.matched_rule_type)}</td>

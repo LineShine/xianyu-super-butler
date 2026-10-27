@@ -2060,6 +2060,7 @@ class XianyuAsync:
         同时注册 mid 等待队列，返回结果中携带 mid，供上层在写入日志后
         异步等待服务端响应、回写发送状态（识别 CSI_FORBID 安全拦截等失败）。
         """
+        dispatch_started = False
         try:
             import base64
             from common.utils.xianyu_utils import generate_mid, generate_uuid
@@ -2119,6 +2120,7 @@ class XianyuAsync:
             except Exception as reg_e:
                 logger.warning(f"【{self.cookie_id}】注册发送结果检测失败（不影响发送）: {self._safe_str(reg_e)}")
 
+            dispatch_started = True
             await self._send_with_echo_tracking(
                 websocket, msg_str, chat_id, content, automatic=automatic
             )
@@ -2151,6 +2153,9 @@ class XianyuAsync:
                 "mode": "text",
                 "content": content,
                 "error_message": str(e),
+                # A socket error can happen after bytes reached the server. Callers with
+                # entitlement/quota semantics must not mistake it for a definite rejection.
+                "delivery_uncertain": dispatch_started,
             }
 
     async def send_raw_message(self, websocket, message: dict):

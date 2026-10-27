@@ -24,7 +24,11 @@ from common.services.captcha.token_response import (
     extract_token_captcha_url,
     is_token_expired_response,
 )
-from common.services.im_token_api import extract_im_access_token
+from common.services.im_token_api import (
+    build_im_token_api_url,
+    build_im_token_request,
+    extract_im_access_token,
+)
 from common.services.remote_token_api import (
     load_remote_token_settings_sync,
     request_remote_xianyu_token_from_settings_sync,
@@ -40,14 +44,9 @@ from common.services.token_api_mode import (
     TOKEN_API_MODE_REMOTE,
     TOKEN_API_MODE_WEB,
     get_token_api_mode_label,
-    get_token_api_name,
     load_token_api_mode_sync,
 )
-from common.utils.xianyu_utils import generate_sign
 
-# token 接口地址前缀与 appKey
-_TOKEN_API_BASE_URL = "https://h5api.m.goofish.com/h5"
-_APP_KEY = "34839810"
 # 重取链接在浏览器验证的 20 秒总超时内执行，必须预留导航和滑动时间。
 _TOKEN_REFETCH_TOTAL_TIMEOUT_SECONDS = 10.0
 _TOKEN_API_CONNECT_TIMEOUT_SECONDS = 3.0
@@ -76,34 +75,8 @@ def _post_token_api(
     Returns:
         ``(响应JSON, 接口下发的Cookie)``
     """
-    api_name = get_token_api_name(api_mode)
-    timestamp = str(int(time.time() * 1000))
-    params = {
-        "jsv": "2.7.2",
-        "appKey": _APP_KEY,
-        "t": timestamp,
-        "sign": "",
-        "v": "1.0",
-        "type": "originaljson",
-        "accountSite": "xianyu",
-        "dataType": "json",
-        "timeout": "20000",
-        "api": api_name,
-        "sessionOption": "AutoLoginOnly",
-        "dangerouslySetWindvaneParams": "%5Bobject%20Object%5D",
-        "smToken": "token",
-        "queryToken": "sm",
-        "sm": "sm",
-        "spm_cnt": "a21ybx.im.0.0",
-        "spm_pre": "a21ybx.home.sidebar.1.4c053da6vYwnmf",
-        "log_id": "4c053da6vYwnmf",
-    }
-    # deviceId 为空时也照常请求：签名只依赖 _m_h5_tk + data_val + 时间戳
-    data_val = '{"appKey":"444e9908a51d1cb236a27862abc769c9","deviceId":"' + (device_id or "") + '"}'
+    params, data_val = build_im_token_request(cookies, device_id, api_mode)
     data = {"data": data_val}
-
-    token = cookies.get("_m_h5_tk", "").split("_")[0] if cookies.get("_m_h5_tk") else ""
-    params["sign"] = generate_sign(params["t"], token, data_val)
 
     headers = {
         "accept": "application/json",
@@ -133,7 +106,7 @@ def _post_token_api(
     )
     read_timeout = max(0.1, request_timeout_seconds - connect_timeout)
     resp = requests.post(
-        f"{_TOKEN_API_BASE_URL}/{api_name}/1.0/",
+        build_im_token_api_url(api_mode),
         params=params,
         data=data,
         headers=headers,

@@ -306,5 +306,9 @@ frontend/dist/
 !backend-web/tests/*.py
 !websocket/tests/
 !websocket/tests/*.py
+!websocket/tests/fixtures/
+websocket/tests/fixtures/*
+!websocket/tests/fixtures/code_order_shipped_detail.json
+!websocket/tests/fixtures/code_order_shipped_sold.json
 !scheduler/tests/
 !scheduler/tests/*.py
