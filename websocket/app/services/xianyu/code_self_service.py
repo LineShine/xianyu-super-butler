@@ -29,7 +29,7 @@ from app.services.xianyu.code_generation_service import (
     is_plain_chat_message, normalize_id, original_timestamp, source_key,
 )
 
-PROMPT = '请提供订单号，将自动发放口令（接下来严格执行，不要发送多余内容，避免自动发放失败）'
+PROMPT = '请提供纯数字的订单编号，将自动发放口令（不要发送多余内容，避免自动发放失败）'
 FORMAT_HINT = '请仅发送数字订单号，不要附加其他内容'
 PROCESSING = '已收到，正在自动处理ing...'
 SCRIPT_ERROR = '机器人回复：自动处理失败，请稍后重试或联系卖家'
