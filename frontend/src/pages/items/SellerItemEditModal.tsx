@@ -178,10 +178,34 @@ export function SellerItemEditModal({ cookieId, itemId, itemTitle, onClose, onSa
   const [categoryLocked, setCategoryLocked] = useState(true)
   const [saving, setSaving] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [draggedImageIndex, setDraggedImageIndex] = useState<number | null>(null)
+  const [imageDropIndex, setImageDropIndex] = useState<number | null>(null)
+
+  const resetImageDrag = () => {
+    setDraggedImageIndex(null)
+    setImageDropIndex(null)
+  }
+
+  const handleImageDrop = (event: React.DragEvent<HTMLDivElement>, targetIndex: number) => {
+    if (draggedImageIndex === null) return
+    event.preventDefault()
+    if (!loading && !saving && !uploading && draggedImageIndex !== targetIndex) {
+      setForm((current) => {
+        const images = [...current.images]
+        if (draggedImageIndex >= images.length || targetIndex >= images.length) return current
+        const [image] = images.splice(draggedImageIndex, 1)
+        images.splice(targetIndex, 0, image)
+        return { ...current, images }
+      })
+    }
+    resetImageDrag()
+  }
 
   useEffect(() => {
     let cancelled = false
     const load = async () => {
+      setDraggedImageIndex(null)
+      setImageDropIndex(null)
       setLoading(true)
       setLoadError('')
       // 账号不存在等场景后端返回 HTTP 错误，统一取后端 message 展示，避免控制台报错
@@ -359,12 +383,47 @@ export function SellerItemEditModal({ cookieId, itemId, itemTitle, onClose, onSa
                 <div className="vben-card-body">
                   <div className="flex flex-wrap gap-2">
                     {form.images.map((url, index) => (
-                      <div key={`${url}-${index}`} className="relative h-20 w-20 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-600 group">
-                        <img src={url} alt="" className="h-full w-full object-cover" />
+                      <div
+                        key={`${url}-${index}`}
+                        draggable={!loading && !saving && !uploading && form.images.length > 1}
+                        title={`第${index + 1}张图片，拖动调整顺序`}
+                        onDragStart={(event) => {
+                          if ((event.target as HTMLElement).closest('button')) {
+                            event.preventDefault()
+                            return
+                          }
+                          event.dataTransfer.effectAllowed = 'move'
+                          event.dataTransfer.setData('text/plain', String(index))
+                          setDraggedImageIndex(index)
+                        }}
+                        onDragOver={(event) => {
+                          if (draggedImageIndex === null) return
+                          event.preventDefault()
+                          event.dataTransfer.dropEffect = 'move'
+                          setImageDropIndex(index)
+                        }}
+                        onDragLeave={(event) => {
+                          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                            setImageDropIndex(null)
+                          }
+                        }}
+                        onDrop={(event) => handleImageDrop(event, index)}
+                        onDragEnd={resetImageDrag}
+                        className={`relative h-20 w-20 select-none overflow-hidden rounded-lg border transition-shadow group ${
+                          imageDropIndex === index && draggedImageIndex !== index
+                            ? 'border-blue-500 ring-2 ring-blue-400'
+                            : 'border-slate-200 dark:border-slate-600'
+                        } ${draggedImageIndex === index ? 'opacity-40' : ''} ${
+                          !loading && !saving && !uploading && form.images.length > 1 ? 'cursor-grab active:cursor-grabbing' : ''
+                        }`}
+                      >
+                        <img src={url} alt={`商品图片 ${index + 1}`} draggable={false} className="h-full w-full object-cover" />
                         {index === 0 && <span className="absolute bottom-0 left-0 right-0 bg-blue-500/80 py-0.5 text-center text-[10px] text-white">首图</span>}
                         <button
                           type="button"
                           title="移除图片"
+                          draggable={false}
+                          disabled={loading || saving || uploading}
                           onClick={() => setForm((current) => ({ ...current, images: current.images.filter((_, itemIndex) => itemIndex !== index) }))}
                           className="absolute right-0.5 top-0.5 rounded bg-black/60 p-0.5 text-white opacity-0 transition-opacity group-hover:opacity-100 hover:bg-red-500"
                         >
@@ -384,6 +443,7 @@ export function SellerItemEditModal({ cookieId, itemId, itemTitle, onClose, onSa
                       </button>
                     )}
                   </div>
+                  <p className="mt-2 text-xs text-slate-400">拖动图片可调整顺序，第一张为首图；保存后生效。</p>
                   <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleUpload} />
                   <ProductVideoUploader
                     videos={form.videos}
