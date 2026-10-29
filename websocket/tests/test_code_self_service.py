@@ -180,6 +180,38 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(log.reply_text, '\n'.join(self.sent()[1:]))
         self.assertTrue(all(c.args[1:3] == ('4001', '2001') for c in self.instance.send_msg.await_args_list))
 
+    async def test_success_ends_format_hints_even_before_wait_expires_and_after_restart(self):
+        await self.begin()
+        await self.auto.handle(self.event('口令'), self.ws)
+        self.assertEqual(self.sent()[-1], self_service.FORMAT_HINT)
+        await self.submit()
+        self.assertEqual(self.sent()[-1], 'aB09zZ')
+        self.assertEqual(self.flows()[0].state, 'finished')
+        self.assertLess(self.clock, self.flows()[0].expires_ms)
+        completed_messages = self.sent()
+
+        for restart in (False, True):
+            if restart:
+                self.auto = self_service.CodeSelfService('1001', self.instance)
+            for text in ('谢谢', 'aB09zZ', '订单号' + ORDER, '口令', '口令收到了'):
+                await self.auto.handle(self.event(text), self.ws)
+            image = self.event('[图片]')
+            image['is_plain_text'] = False
+            await self.auto.handle(image, self.ws)
+            self.assertEqual(self.sent(), completed_messages)
+            self.assertEqual(self.flows()[0].state, 'finished')
+
+        self.api.assert_awaited_once()
+        self.runner.assert_awaited_once()
+        self.clock += self_service.WINDOW_MS + 1
+        self.assertFalse(await self.auto.handle(self.event('谢谢'), self.ws))
+        self.assertEqual(self.sent(), completed_messages)
+        # 冷却结束后主动询问“口令”会开始新一轮，此后才再次提示格式。
+        await self.begin()
+        self.assertEqual(self.sent()[-1], self_service.PROMPT)
+        await self.auto.handle(self.event('你好'), self.ws)
+        self.assertEqual(self.sent()[-1], self_service.FORMAT_HINT)
+
     async def test_official_response_contract_reaches_generation_and_refunds_still_block(self):
         fixtures = Path(__file__).parent / 'fixtures'
         detail, sold = [json.loads((fixtures / f'code_order_shipped_{kind}.json').read_text())
@@ -202,28 +234,49 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         self.runner.assert_awaited_once()
         self.assertEqual(sum(a.quota_state == 'success' for a in self.attempts()), 1)
 
-    async def test_keyword_cooldown_is_fixed_and_other_buyers_are_independent(self):
+    async def test_repeated_keywords_get_format_hint_without_extending_wait(self):
         await self.begin()
         expiry = self.flows()[0].expires_ms
         self.clock += 1000
-        for _ in range(3):
-            await self.auto.handle(self.event('口令呢'), self.ws)
-        self.assertEqual(self.sent(), [self_service.PROMPT])
+        for text in ('口令', '口令呢', '口令'):
+            await self.auto.handle(self.event(text), self.ws)
+        self.assertEqual(self.sent(), [self_service.PROMPT] + [self_service.FORMAT_HINT] * 3)
         self.assertEqual(self.flows()[0].expires_ms, expiry)
         await self.begin(chat='other', buyer='2002')
-        self.assertEqual(self.sent(), [self_service.PROMPT] * 2)
+        self.assertEqual(self.sent(), [self_service.PROMPT] + [self_service.FORMAT_HINT] * 3 + [self_service.PROMPT])
+        self.api.assert_not_awaited()
+        self.runner.assert_not_awaited()
 
-    async def test_non_numeric_format_reminded_once_no_trim_or_unicode_conversion(self):
+    async def test_each_invalid_reply_gets_hint_no_trim_or_unicode_conversion(self):
         await self.begin()
-        for text in ('订单号' + ORDER, ' ' + ORDER, ORDER + '\n', '１２３４', '9' * 65, '你好'):
+        expiry = self.flows()[0].expires_ms
+        invalid_texts = ('订单号' + ORDER, ' ' + ORDER, ORDER + '\n', '１２３４', '9' * 65, '你好', '你好')
+        for index, text in enumerate(invalid_texts, 1):
             await self.auto.handle(self.event(text), self.ws)
+            self.assertEqual(self.sent(), [self_service.PROMPT] + [self_service.FORMAT_HINT] * index)
         image = self.event('[图片]')
         image['is_plain_text'] = False
         await self.auto.handle(image, self.ws)
-        self.assertEqual(self.sent(), [self_service.PROMPT, self_service.FORMAT_HINT])
+        self.assertEqual(self.sent(), [self_service.PROMPT] + [self_service.FORMAT_HINT] * (len(invalid_texts) + 1))
+        self.assertEqual(self.flows()[0].expires_ms, expiry)
+        self.assertEqual(self.flows()[0].state, 'waiting')
+        self.assertTrue(all(a.quota_state == 'none' for a in self.attempts()))
         self.api.assert_not_awaited()
         await self.submit()
         self.runner.assert_awaited_once()
+
+    async def test_format_hint_deduplicates_replays_but_new_replies_after_restart_get_hint(self):
+        await self.begin()
+        event = self.event('你好')
+        await self.auto.handle(event, self.ws)
+        self.auto = self_service.CodeSelfService('1001', self.instance)
+        await self.auto.handle(deepcopy(event), self.ws)
+        self.assertEqual(self.sent(), [self_service.PROMPT, self_service.FORMAT_HINT])
+        await self.auto.handle(self.event('你好'), self.ws)
+        await self.auto.handle(self.event('口令'), self.ws)
+        self.assertEqual(self.sent(), [self_service.PROMPT] + [self_service.FORMAT_HINT] * 3)
+        self.api.assert_not_awaited()
+        self.runner.assert_not_awaited()
 
     async def test_validation_failure_allows_correction_without_extending_wait(self):
         await self.begin()
@@ -322,6 +375,7 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_order_cooldown_across_chats_and_midnight_uses_beijing_day(self):
         self.clock = int(datetime.fromisoformat('2026-10-26T23:59:59+08:00').timestamp() * 1000)
+        self.modify_item(**{ENABLED_AT_KEY: self.clock - 2000})
         await self.cycle()
         self.clock += 2000
         await self.cycle(chat='another-chat')
@@ -422,6 +476,7 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_midnight_between_reservation_and_dispatch_moves_quota_to_send_day(self):
         self.clock = int(datetime.fromisoformat('2026-10-26T23:59:59+08:00').timestamp() * 1000)
+        self.modify_item(**{ENABLED_AT_KEY: self.clock - 2000})
         async def generate():
             self.clock += 2000
             return 'aB09zZ'
@@ -500,9 +555,11 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(MessageHandler, '_load_message_expire_time', return_value=3600):
             handler = MessageHandler('1001')
         handler.set_chat_message_handler(reply.handle_chat_message)
-        for event in (self.event(), self.event(ORDER)):
+        for event in (self.event(), self.event('口令'), self.event('订单号' + ORDER), self.event(ORDER)):
             frame = {'body': {'syncPushPackage': {'data': [{'data': base64.b64encode(json.dumps(event['raw_message']).encode()).decode()}]}}}
             await asyncio.gather(handler.handle_message(frame, self.ws), handler.handle_message(frame, self.ws, acknowledge=False))
         reply.get_reply.assert_not_awaited()
         reply._record_auto_reply_log.assert_not_awaited()
         self.runner.assert_awaited_once()
+        self.assertEqual(self.sent(), [self_service.PROMPT, self_service.FORMAT_HINT,
+                                      self_service.FORMAT_HINT, self_service.PROCESSING, '口令生成', 'aB09zZ'])

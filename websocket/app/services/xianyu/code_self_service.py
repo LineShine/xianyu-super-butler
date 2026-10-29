@@ -29,8 +29,8 @@ from app.services.xianyu.code_generation_service import (
     is_plain_chat_message, normalize_id, original_timestamp, source_key,
 )
 
-PROMPT = '请提供纯数字的订单编号，将自动发放口令（不要发送多余内容，避免自动发放失败）'
-FORMAT_HINT = '请仅发送数字订单号，不要附加其他内容'
+PROMPT = '请提供订单编号，将自动发放口令（纯数字，不要发送多余内容，避免自动发放失败）'
+FORMAT_HINT = '请仅发送数字订单编号，不要附加其他内容'
 PROCESSING = '已收到，正在自动处理ing...'
 SCRIPT_ERROR = '机器人回复：自动处理失败，请稍后重试或联系卖家'
 LIMIT_HINT = '该订单今日已领取超过限制'
@@ -231,15 +231,13 @@ class CodeSelfService:
                     reason, detail = 'code_context', '消息早于本轮开始或商品不匹配'
                 elif flow.state != 'waiting':
                     reason = 'code_flow_busy'
-                elif keyword:
-                    reason = 'code_keyword_cooldown'
                 elif plain and re.fullmatch(r'[0-9]{1,64}', message.get('send_message', '')):
                     kind = 'order'
-                elif not flow.reminded:
+                else:
+                    # 等待订单号时，每条格式错误的新消息（含再次询问“口令”）都提示。
+                    # 重复推送已由上方 Attempt 去重；提示不延长本轮等待时间。
                     flow.reminded = True
                     kind = 'format'
-                else:
-                    reason = 'code_format_ignored'
             elif flow and now < flow.cooldown_until_ms:
                 reason = 'code_keyword_cooldown'
             else:
