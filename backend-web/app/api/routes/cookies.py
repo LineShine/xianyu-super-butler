@@ -265,8 +265,10 @@ async def list_cookie_details_paginated(
     # 在线状态：口径与仪表盘“在线账号”一致（websocket 真实连接的账号集合）。
     # 同时用于：①在线/离线筛选条件；②列表每行的 online 字段展示。失败时按空集合处理。
     online_ids: frozenset[str] = frozenset()
+    account_health = {}
     try:
         online_ids = await DashboardStatsService(session).get_online_account_ids()
+        account_health = await DashboardStatsService(session).get_account_message_health()
     except Exception:
         online_ids = frozenset()
 
@@ -341,6 +343,9 @@ async def list_cookie_details_paginated(
             "value": account.cookie or "",
             "enabled": _status_to_enabled(account.status),
             "online": account.account_id in online_ids,
+            "message_sync_status": account_health.get(account.account_id, {}).get('message_sync_status'),
+            "offline_reason": account_health.get(account.account_id, {}).get('offline_reason', ''),
+            "relogin_required": account_health.get(account.account_id, {}).get('relogin_required', False),
             "auto_confirm": bool(account.auto_confirm),
             "scheduled_redelivery": bool(account.scheduled_redelivery),
             "scheduled_rate": bool(account.scheduled_rate),

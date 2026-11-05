@@ -36,14 +36,16 @@ class OutgoingMessageTracker:
     def discard(self, token):
         self._pending.pop(token, None)
 
-    def consume_echo(self, account_id, chat_id, content, timestamp_ms=None):
+    def consume_echo(self, account_id, chat_id, content, timestamp_ms=None, *, max_age_seconds=None):
         self._prune()
         key = self._key(account_id, chat_id, content)
         try:
             message_time = float(timestamp_ms) / 1000 if timestamp_ms else None
         except (TypeError, ValueError):
             message_time = None
-        for token, (expected, _, sent_at) in self._pending.items():
+        for token, (expected, recorded_at, sent_at) in self._pending.items():
+            if max_age_seconds is not None and time.monotonic() - recorded_at > max_age_seconds:
+                continue
             # A delayed push from before this send is not its echo. Allow small
             # clock skew between the local machine and the IM server.
             if key == expected and (message_time is None or message_time >= sent_at - 2):

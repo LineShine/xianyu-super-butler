@@ -7,7 +7,6 @@ import json
 import math
 import re
 import sys
-import time
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -25,6 +24,7 @@ from common.models.ytx_account import YtxAccount
 from common.models.ytx_catalog_item import YtxCatalogItem
 from common.models.ytx_order import YtxOrder
 from common.services import code_generation_config as config
+from app.services.xianyu import code_timing
 from common.utils.xianyu_message_parser import decode_first_content, interpret_content
 
 SCRIPT_PATH = Path(__file__).resolve().parents[4] / "common/custom_func/generate_code.py"
@@ -45,7 +45,7 @@ def original_timestamp(message: dict) -> int | None:
     try:
         number = float(value)
         # IM sync timestamps are milliseconds. Do not invent a timestamp for old pushes.
-        return int(number) if math.isfinite(number) and number >= 1_000_000_000_000 and number.is_integer() else None
+        return int(number) if math.isfinite(number) and 1_000_000_000_000 <= number < 253402214400000 and number.is_integer() else None
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -155,6 +155,7 @@ class Claim:
     item_id: str
     enabled_at: int
     timestamp_ms: int
+    received: code_timing.Receipt
 
 
 @dataclass(frozen=True)
@@ -218,6 +219,7 @@ class CodeGenerationService:
         seller = normalize_id(getattr(self.instance, "myid", ""))
         if not is_seller_command(message, seller):
             return False
+        code_timing.receipt(message)
         chat_id = normalize_id(message["chat_id"])
         lock_key = (self.account_id, chat_id)
         local_lock = _chat_locks.setdefault(lock_key, asyncio.Lock())
@@ -275,6 +277,7 @@ class CodeGenerationService:
     async def _claim(self, message: dict, forced_error: CommandStopped | None = None) -> Claim | None:
         chat_id, key = normalize_id(message["chat_id"]), source_key(message)
         timestamp = original_timestamp(message)
+        received = code_timing.receipt(message)
         async with async_session_maker() as session:
             account = (await session.execute(select(YtxAccount).where(
                 YtxAccount.account_id == self.account_id,
@@ -315,8 +318,8 @@ class CodeGenerationService:
                     raise forced_error
                 if timestamp is None:
                     raise CommandStopped("code_invalid_time", "消息缺少有效的原始毫秒时间，未执行脚本")
-                if not 0 <= int(time.time() * 1000) - timestamp <= config.MAX_MESSAGE_AGE_MS:
-                    raise CommandStopped("code_stale", "只处理最近 5 分钟内发送的指令")
+                if not code_timing.is_recent(received, config.MAX_MESSAGE_AGE_MS):
+                    raise CommandStopped("code_stale", "只处理本机最近 5 分钟内接收的指令")
                 if account.status != "active" or normalize_id(account.unb or account.account_id) != normalize_id(message["send_user_id"]):
                     raise CommandStopped("code_account_inactive", "当前卖家账号未启用或身份不符")
                 if await self._is_recorded_automatic_echo(session, message, timestamp):
@@ -331,12 +334,12 @@ class CodeGenerationService:
                     raise CommandStopped("code_context", "当前账号没有此商品，未执行脚本")
                 if any(not config.enabled(item.metadata_json) for item in items):
                     raise CommandStopped("code_disabled", "该商品未开启口令生成")
-                if any(not config.message_allowed(item.metadata_json, timestamp, int(time.time() * 1000)) for item in items):
-                    raise CommandStopped("code_stale", "指令早于商品本次开启时间或已过期")
+                if any(type(item.metadata_json.get(config.ENABLED_AT_KEY)) is not int for item in items):
+                    raise CommandStopped("code_stale", "商品缺少有效的口令开启版本")
                 since = items[0].metadata_json[config.ENABLED_AT_KEY]
                 record.item_title = items[0].title
                 record.context_snapshot = {"buyer_id": buyer_id, "item_id": item_id, "enabled_at": since,
-                                           "source_timestamp_ms": timestamp, "claim": "at_most_once"}
+                                           "source_timestamp_ms": timestamp, "received_local_ms": received.local_ms, "claim": "at_most_once"}
                 target = (buyer_id, item_id, since)
             except CommandStopped as exc:
                 record.process_status = "skipped"
@@ -347,7 +350,7 @@ class CodeGenerationService:
             await session.commit()  # Never launch a child until the durable claim succeeds.
             if target is None:
                 return None
-            return Claim(log_id, account_pk, owner_id, chat_id, *target, timestamp)
+            return Claim(log_id, account_pk, owner_id, chat_id, *target, timestamp, received)
 
     async def _resolve_target(self, session, account, message: dict) -> tuple[str, str]:
         chat = normalize_id(message["chat_id"])
@@ -403,17 +406,19 @@ class CodeGenerationService:
             CodeSelfServiceAttempt.account_pk == select(YtxAccount.id).where(
                 YtxAccount.account_id == self.account_id).scalar_subquery(),
             CodeSelfServiceAttempt.chat_id == normalize_id(message["chat_id"]),
-            CodeSelfServiceAttempt.marker_at_ms.between(timestamp - 10000, timestamp + 10000),
+            CodeSelfServiceAttempt.marker_at_ms.between(
+                timestamp - config.AUTOMATIC_ECHO_WINDOW_MS, timestamp + config.AUTOMATIC_ECHO_WINDOW_MS),
         ).limit(1))).first()
         if automatic:
             return True
-        sent_at = datetime.fromtimestamp(timestamp / 1000)
+        sent_at = datetime.fromtimestamp(code_timing.receipt(message).local_ms / 1000)
         row = (await session.execute(select(ReplyLog.id).where(
             ReplyLog.account_id == self.account_id,
             ReplyLog.chat_id == normalize_id(message["chat_id"]),
             ReplyLog.reply_strategy.notin_(["code_generation", "none"]),
             ReplyLog.reply_text == message["send_message"],
-            ReplyLog.created_at.between(sent_at - timedelta(seconds=10), sent_at + timedelta(seconds=10)),
+            ReplyLog.created_at.between(sent_at - timedelta(milliseconds=config.AUTOMATIC_ECHO_WINDOW_MS),
+                                       sent_at + timedelta(milliseconds=config.AUTOMATIC_ECHO_WINDOW_MS)),
         ).limit(1))).first()
         return row is not None
 
@@ -433,7 +438,7 @@ class CodeGenerationService:
             if not items or any(not config.enabled(item.metadata_json) for item in items):
                 raise CommandStopped("code_disabled", "执行期间商品已关闭口令生成或被删除，未发送口令")
             if any(item.metadata_json.get(config.ENABLED_AT_KEY) != claim.enabled_at or
-                   not config.message_allowed(item.metadata_json, claim.timestamp_ms, int(time.time() * 1000)) for item in items):
+                   not code_timing.is_recent(claim.received, config.MAX_MESSAGE_AGE_MS) for item in items):
                 raise CommandStopped("code_stale", "商品已重新开启或指令已过期，未发送口令")
 
     def check_connection(self, websocket) -> None:

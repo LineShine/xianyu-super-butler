@@ -323,10 +323,10 @@ export function Accounts() {
   // 是否管理员：管理员可查看全量账号，需展示账号所属用户列
   const isAdmin = Boolean(user?.is_admin)
 
-  const loadAccounts = async (page: number = pagination.page, pageSize: number = pagination.pageSize, currentFilters: AccountFilters = filters) => {
+  const loadAccounts = async (page: number = pagination.page, pageSize: number = pagination.pageSize, currentFilters: AccountFilters = filters, silent = false) => {
     if (!_hasHydrated || !isAuthenticated || !token) return
     try {
-      setAccountsLoading(true)
+      if (!silent) setAccountsLoading(true)
       
       // 构建筛选参数
       const filterParams: AccountFilterParams = {}
@@ -359,12 +359,26 @@ export function Accounts() {
         totalPages: result.total_pages,
       })
     } catch {
-      addToast({ type: 'error', message: '加载账号列表失败' })
+      if (!silent) addToast({ type: 'error', message: '加载账号列表失败' })
     } finally {
-      setAccountsLoading(false)
-      setLoading(false)
+      if (!silent) {
+        setAccountsLoading(false)
+        setLoading(false)
+      }
     }
   }
+
+  // Keep offline/relogin notices current without interrupting an open editor.
+  const refreshAccountStatusRef = useRef(() => {})
+  refreshAccountStatusRef.current = () => {
+    if (!activeModal && !accountsLoading && document.visibilityState === 'visible') {
+      void loadAccounts(pagination.page, pagination.pageSize, filters, true)
+    }
+  }
+  useEffect(() => {
+    const timer = setInterval(() => refreshAccountStatusRef.current(), 30_000)
+    return () => clearInterval(timer)
+  }, [])
 
   // 分页切换
   const handlePageChange = (newPage: number) => {
@@ -2522,8 +2536,16 @@ export function Accounts() {
                           : 'bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-400'
                       }`}>
                         <span className={`status-dot ${account.online ? 'status-dot-success' : 'status-dot-danger'}`} />
-                        {account.online ? '在线' : '离线'}
+                        {account.message_sync_status === 'recovering' ? '重连验证中' : account.online ? '在线' : '离线'}
                       </span>
+                      {account.relogin_required && (
+                        <div className="mt-1 max-w-[200px] text-xs text-red-600 dark:text-red-400">
+                          <p>{account.offline_reason}</p>
+                          <button className="mt-1 underline" onClick={() => startQRCodeLogin()}>
+                            重新扫码登录
+                          </button>
+                        </div>
+                      )}
                     </td>
                     <td>
                       <span className={`inline-flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded ${

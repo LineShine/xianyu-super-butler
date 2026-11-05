@@ -7,7 +7,7 @@
  * 3. 支持暗黑模式
  * 4. 自适应手机端
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ResponsiveContainer,
   AreaChart,
@@ -43,27 +43,31 @@ function ChartTooltip({ active, payload, label }: {
   )
 }
 
-export function OrderAmountChart() {
+export function OrderAmountChart({ refreshKey = 0 }: { refreshKey?: number }) {
   const { addToast } = useUIStore()
   const [loading, setLoading] = useState(true)
   const [data, setData] = useState<OrderTrendItem[]>([])
 
+  const requestId = useRef(0)
+
   /** 加载趋势数据 */
   const loadTrend = async () => {
+    const id = ++requestId.current
     try {
       setLoading(true)
       const result = await getOrderAmountTrend()
-      setData(result)
+      if (id === requestId.current) setData(result)
     } catch {
-      addToast({ type: 'error', message: '加载订单金额趋势失败' })
+      if (id === requestId.current) addToast({ type: 'error', message: '加载订单金额趋势失败' })
     } finally {
-      setLoading(false)
+      if (id === requestId.current) setLoading(false)
     }
   }
 
   useEffect(() => {
     loadTrend()
-  }, [])
+    return () => { requestId.current += 1 }
+  }, [refreshKey])
 
   // 计算汇总数据
   const totalAmount = data.reduce((s, d) => s + d.amount, 0)

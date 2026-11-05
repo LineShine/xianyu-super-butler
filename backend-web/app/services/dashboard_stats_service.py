@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +41,7 @@ class DashboardStatsService:
 
     # Online account-id set cache: (timestamp, frozenset[account_id])
     _online_ids_cache: tuple[float, frozenset[str]] | None = None
+    _account_health_cache: dict[str, dict] = {}
     _ONLINE_IDS_CACHE_TTL = 10  # seconds
 
     INACTIVE_ACCOUNT_STATUSES = ("inactive", "disabled", "suspended", "deleted")
@@ -77,14 +78,7 @@ class DashboardStatsService:
             amount_map[date_str] = round(amount_map.get(date_str, 0) + float(row.daily_amount or 0), 2)
             count_map[date_str] = count_map.get(date_str, 0) + int(row.daily_count or 0)
 
-    @classmethod
-    def _merge_order_summary_row(cls, summary: dict[str, int | float], row) -> None:
-        summary["today_orders"] = int(summary["today_orders"]) + int(row.today_orders or 0)
-        summary["today_shipped"] = int(summary["today_shipped"]) + int(row.today_shipped or 0)
-        summary["today_pending"] = int(summary["today_pending"]) + int(row.today_pending or 0)
-        summary["today_amount"] = float(summary["today_amount"]) + float(row.today_amount or 0)
-
-    async def _get_today_order_summary_row(self, *, time_column, start_time: datetime):
+    async def _get_order_summary_row(self, *, time_column, start_time: datetime, end_time: datetime):
         stmt = (
             select(
                 func.coalesce(
@@ -125,7 +119,7 @@ class DashboardStatsService:
                 ).label("today_amount"),
             )
             .select_from(YtxOrder)
-            .where(time_column >= start_time)
+            .where(time_column >= start_time, time_column < end_time)
         )
         return (await self.session.execute(stmt)).one()
 
@@ -136,8 +130,6 @@ class DashboardStatsService:
         )
 
     async def _load_admin_dashboard_bundle(self) -> dict[str, dict[str, int | float]]:
-        today_start = self._build_today_start()
-
         users_stmt = select(func.count()).select_from(User)
         total_users = int((await self.session.execute(users_stmt)).scalar() or 0)
 
@@ -191,25 +183,6 @@ class DashboardStatsService:
 
         reply_stats = await AutoReplyStatsService(self.session).get_today_and_yesterday_success_reply_counts()
 
-        today_users_stmt = select(func.count()).select_from(User).where(User.created_at >= today_start)
-        today_users = int((await self.session.execute(today_users_stmt)).scalar() or 0)
-
-        today_accounts_stmt = select(func.count()).select_from(YtxAccount).where(YtxAccount.created_at >= today_start)
-        today_accounts = int((await self.session.execute(today_accounts_stmt)).scalar() or 0)
-
-        today_order_summary: dict[str, int | float] = {
-            "today_orders": 0,
-            "today_shipped": 0,
-            "today_pending": 0,
-            "today_amount": 0.0,
-        }
-        # 只按真实下单时间(placed_at)统计，不对 created_at 做回退，
-        # 避免同步历史订单时 created_at=今天被误算为今日订单
-        placed_row = await self._get_today_order_summary_row(time_column=YtxOrder.placed_at, start_time=today_start)
-        self._merge_order_summary_row(today_order_summary, placed_row)
-
-        today_agent_orders = 0
-
         return {
             "admin_stats": {
                 "total_users": total_users,
@@ -221,15 +194,6 @@ class DashboardStatsService:
                 "yesterday_reply_count": int(reply_stats["yesterday_reply_count"]),
                 "total_cards": total_cards,
                 "password_configured": int(accounts_row.password_configured or 0),
-            },
-            "today_stats": {
-                "today_users": today_users,
-                "today_accounts": today_accounts,
-                "today_orders": int(today_order_summary["today_orders"]),
-                "today_shipped": int(today_order_summary["today_shipped"]),
-                "today_pending": int(today_order_summary["today_pending"]),
-                "today_amount": round(float(today_order_summary["today_amount"]), 2),
-                "today_agent_orders": today_agent_orders,
             },
         }
 
@@ -335,13 +299,19 @@ class DashboardStatsService:
             if isinstance(response, dict) and response.get("success"):
                 raw_ids = (response.get("data") or {}).get("connected_account_ids") or []
                 ids = frozenset(str(x) for x in raw_ids)
+                self.__class__._account_health_cache = (response.get('data') or {}).get('account_health') or {}
                 self.__class__._online_ids_cache = (now, ids)
                 return ids
         except Exception as e:
             logger.warning(f"获取在线账号ID列表失败: {e}")
         # 失败也缓存（空集合，10 秒）：避免 websocket 异常时每次账号列表请求都重试拖慢响应
         self.__class__._online_ids_cache = (now, frozenset())
+        self.__class__._account_health_cache = {}
         return frozenset()
+
+    async def get_account_message_health(self) -> dict[str, dict]:
+        await self.get_online_account_ids()
+        return self.__class__._account_health_cache
 
     async def get_admin_dashboard_stats(self, *, current_user_id: int) -> dict[str, int | None]:
         """获取管理员首页全局统计。"""
@@ -366,19 +336,30 @@ class DashboardStatsService:
             "current_user_remaining_account_count": limit_status["remaining_count"],
         }
 
-    async def get_admin_today_stats(self) -> dict[str, int | float]:
-        """获取管理员今日统计。"""
-        bundle = await self._get_admin_dashboard_bundle()
-        today_stats = bundle["today_stats"]
-
+    async def get_admin_today_stats(
+        self, *, start_date: date | None = None, end_date: date | None = None,
+    ) -> dict[str, int | float]:
+        """按北京时间自然日统计，结束日期包含当天；字段名保持兼容。刷新直接查库。"""
+        if (start_date is None) != (end_date is None):
+            raise ValueError("请同时选择开始日期和结束日期")
+        if start_date is None:
+            start_date = end_date = self._build_today_start().date()
+        if end_date < start_date or end_date == date.max:
+            raise ValueError("结束日期须不早于开始日期，且早于9999-12-31")
+        start = datetime.combine(start_date, datetime_time.min)
+        end = datetime.combine(end_date + timedelta(days=1), datetime_time.min)
+        users = (await self.session.execute(select(func.count()).select_from(User).where(
+            User.created_at >= start, User.created_at < end))).scalar() or 0
+        accounts = (await self.session.execute(select(func.count()).select_from(YtxAccount).where(
+            YtxAccount.created_at >= start, YtxAccount.created_at < end))).scalar() or 0
+        # 仅使用真实下单时间，避免同步历史订单被算进当前范围。
+        row = await self._get_order_summary_row(
+            time_column=YtxOrder.placed_at, start_time=start, end_time=end)
         return {
-            "today_users": int(today_stats["today_users"]),
-            "today_accounts": int(today_stats["today_accounts"]),
-            "today_orders": int(today_stats["today_orders"]),
-            "today_shipped": int(today_stats["today_shipped"]),
-            "today_pending": int(today_stats["today_pending"]),
-            "today_amount": round(float(today_stats["today_amount"]), 2),
-            "today_agent_orders": int(today_stats["today_agent_orders"]),
+            "today_users": int(users), "today_accounts": int(accounts),
+            "today_orders": int(row.today_orders), "today_shipped": int(row.today_shipped),
+            "today_pending": int(row.today_pending), "today_amount": round(float(row.today_amount), 2),
+            "today_agent_orders": 0,
         }
 
     async def get_order_amount_trend(self, *, owner_id: int | None, days: int = 30) -> list[dict[str, int | float | str]]:

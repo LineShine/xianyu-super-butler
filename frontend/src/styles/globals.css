@@ -844,3 +844,11 @@
 .announcement-vertical-scroll {
   animation: announcement-slide-in 0.5s ease-out;
 }
+
+/* Only active mouse horizontal drags lock selection; native touch scrolling is unchanged. */
+html.horizontal-mouse-dragging,
+html.horizontal-mouse-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}

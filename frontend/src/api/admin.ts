@@ -489,10 +489,10 @@ export const getAdminStats = async (): Promise<{ success: boolean; data?: AdminS
   }
 }
 
-// 获取今日统计数据（管理员专用）
-export const getTodayStats = async (): Promise<{ success: boolean; data?: TodayStats }> => {
+// 获取日期范围统计（管理员专用），不传日期默认今日
+export const getTodayStats = async (range?: { start_date: string; end_date: string }): Promise<{ success: boolean; data?: TodayStats }> => {
   try {
-    const data = await get<TodayStats & { success: boolean }>(`${ADMIN_PREFIX}/stats/today`)
+    const data = await get<TodayStats & { success: boolean }>(`${ADMIN_PREFIX}/stats/today`, { params: range })
     return { success: true, data }
   } catch {
     return { success: false }

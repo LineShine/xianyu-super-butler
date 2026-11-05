@@ -665,6 +665,9 @@ class MessageHandler:
     async def _process_single_message(self, message: dict, websocket) -> bool:
         """处理单条消息（参照旧框架message_handler_core.py）"""
         try:
+            observer = getattr(self, 'message_observer', None)
+            if observer and self.is_chat_message(message) and not self.is_system_tip_message(message):
+                observer(message)
             # 提取消息ID进行去重
             if not await self.claim_message(message):
                 logger.debug(f"【{self.cookie_id}】消息已处理，跳过重复推送")

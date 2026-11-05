@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 import test_code_generation as base_tests
 from app.services.xianyu import code_self_service as self_service
+from app.services.xianyu import code_timing
 from app.services.xianyu import code_generation_service as commands
 from app.services.xianyu.auto_reply_service import AutoReplyService
 from app.services.xianyu.message_handler import MessageHandler
@@ -119,7 +120,8 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         for target, value in (
             ('app.services.xianyu.code_self_service.async_session_maker', self.sessions),
             ('app.services.xianyu.code_self_service.now_ms', lambda: self.clock),
-            ('app.services.xianyu.code_generation_service.time.time', lambda: self.clock / 1000),
+            ('app.services.xianyu.code_timing.now_ms', lambda: self.clock),
+            ('app.services.xianyu.code_timing.time.time', lambda: self.clock / 1000),
             ('app.services.xianyu.code_self_service.check_order_entitlement', self.api),
         ):
             p = patch(target, value)
@@ -298,13 +300,13 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.begin()
         self.assertEqual(self.sent(), [self_service.PROMPT] * 2)
 
-    async def test_seller_card_quoted_auto_missing_stale_and_pre_enable_never_trigger(self):
+    async def test_seller_card_quoted_auto_and_invalid_timestamp_never_trigger(self):
         invalid = [self.event(buyer='1001')]
         for key, value in [('isAutoReply', True), ('isSystem', True)]:
             event = self.event()
             event['raw_message']['1']['10'][key] = value
             invalid.append(event)
-        for timestamp in (0, self.clock - 301000, self.clock + 1000):
+        for timestamp in (0, True, 'NaN'):
             event = self.event()
             event['raw_message']['1']['5'] = timestamp
             invalid.append(event)
@@ -316,9 +318,45 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         invalid.append(card)
         for event in invalid:
             self.assertFalse(await self.auto.handle(event, self.ws))
-        self.modify_item(**{ENABLED_AT_KEY: self.clock + 1})
-        await self.auto.handle(self.event(), self.ws)
         self.assertFalse(self.sent())
+
+    async def test_local_date_changes_do_not_block_buyer_flow_or_change_wait_duration(self):
+        platform_time = self.clock
+        for offset in (30 * 86400, -30 * 86400):
+            local_wall = platform_time / 1000 + offset
+            with patch.object(code_timing.time, 'time', return_value=local_wall) as wall:
+                event = self.event()
+                event['raw_message']['1']['5'] = platform_time
+                await self.auto.handle(event, self.ws)
+                expiry = self.flows()[0].expires_ms
+                wall.return_value -= 2 * 86400
+                await self.auto.handle(self.event('口令'), self.ws)
+                self.assertEqual(self.sent()[-1], self_service.FORMAT_HINT)
+                self.assertEqual(self.flows()[0].expires_ms, expiry)
+                event = self.event(ORDER)
+                event['raw_message']['1']['5'] = platform_time
+                await self.auto.handle(event, self.ws)
+                self.assertEqual(self.sent()[-1], 'aB09zZ')
+                self.assertEqual(self.flows()[0].state, 'finished')
+                successful = [a for a in self.attempts() if a.quota_state == 'success']
+                self.assertEqual(successful[-1].quota_day, self_service.quota_day(int(wall.return_value * 1000)))
+                # A native/Web echo uses platform time even when local time differs by days.
+                reply = AutoReplyService('1001', self.instance)
+                reply._record_auto_reply_log = AsyncMock()
+                reply._pause_ai_reply_after_manual_message = AsyncMock()
+                echo = message(mid=f'echo-{offset}', text='口令生成', timestamp=platform_time)
+                await reply.handle_chat_message(echo, self.ws)
+                reply._pause_ai_reply_after_manual_message.assert_not_awaited()
+            self.clock += self_service.WINDOW_MS + 1
+        self.assertEqual(self.runner.await_count, 2)
+
+    async def test_restart_after_clock_rollback_does_not_leave_future_cooldown(self):
+        await self.cycle()
+        self.clock -= 30 * 86400 * 1000
+        self.auto = self_service.CodeSelfService('1001', self.instance)
+        await self.cycle()
+        self.assertEqual(self.sent()[-1], 'aB09zZ')
+        self.assertEqual(self.runner.await_count, 2)
 
     async def test_closed_item_and_inactive_account_do_not_send(self):
         self.modify_item(**{ENABLED_KEY: False})
@@ -372,6 +410,34 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.cycle()
         self.assertEqual(self.sent()[-1], self_service.LIMIT_HINT)
         self.assertEqual(self.runner.await_count, 3)
+
+    async def test_three_minute_cooldown_and_five_minute_input_window(self):
+        await self.cycle()
+        finished = self.clock
+        self.assertEqual(self.flows()[0].cooldown_until_ms, finished + 180_000)
+        self.clock = finished + 179_000
+        await self.begin()
+        self.assertEqual(self.records()[-1].decision_reason, 'code_keyword_cooldown')
+        # A different chat cannot bypass the same order's three-minute cooldown.
+        await self.cycle(chat='other-chat')
+        self.assertIn('秒后再领取', self.sent()[-1])
+        self.clock = finished + 180_000
+        await self.begin()
+        started = self.clock
+        self.assertEqual(self.flows()[0].expires_ms, started + 300_000)
+        self.clock = started + 240_000
+        await self.auto.handle(self.event('格式错误'), self.ws)
+        self.assertEqual(self.sent()[-1], self_service.FORMAT_HINT)
+        await self.submit()
+        self.assertEqual(self.runner.await_count, 2)
+
+    async def test_automatic_marker_window_is_five_seconds(self):
+        await self.cycle()
+        marker_time = next(a.marker_at_ms for a in self.attempts() if a.marker_at_ms)
+        for delay, expected_runs in [(5000, 1), (5001, 2)]:
+            self.clock = marker_time + delay
+            await self.service.handle(message(mid=f'manual-{delay}', text='口令生成', timestamp=self.clock), self.ws)
+            self.assertEqual(self.runner.await_count, expected_runs)
 
     async def test_order_cooldown_across_chats_and_midnight_uses_beijing_day(self):
         self.clock = int(datetime.fromisoformat('2026-10-26T23:59:59+08:00').timestamp() * 1000)

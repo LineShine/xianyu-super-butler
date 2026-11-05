@@ -11,6 +11,15 @@ from app.services.xianyu.xianyu_async import XianyuAsync
 
 
 class EchoTrackerTests(unittest.TestCase):
+    def test_command_window_five_seconds_does_not_change_other_echo_ttl(self):
+        tracker = OutgoingMessageTracker()
+        with patch('app.services.xianyu.outgoing_message_tracker.time.monotonic', return_value=10):
+            tracker.remember('seller', 'chat', '口令生成')
+            tracker.remember('seller', 'chat', '在的')
+        with patch('app.services.xianyu.outgoing_message_tracker.time.monotonic', return_value=15.01):
+            self.assertFalse(tracker.consume_echo('seller', 'chat', '口令生成', max_age_seconds=5))
+            self.assertTrue(tracker.consume_echo('seller', 'chat', '在的'))
+
     def test_match_is_scoped_and_consumed_once(self):
         tracker = OutgoingMessageTracker()
         tracker.remember('seller', 'chat@goofish', '在的')

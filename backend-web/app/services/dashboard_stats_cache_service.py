@@ -3,7 +3,7 @@
 
 功能：
 1. 为管理员全局仪表盘统计提供短TTL内存缓存。
-2. 让 /admin/stats 与 /admin/stats/today 共享同一份全局统计快照。
+2. 缓存 /admin/stats 全局快照；日期范围统计独立查询，刷新时直接查库。
 3. 为当前登录管理员的额度状态提供短TTL缓存，减少重复查询。
 """
 from __future__ import annotations

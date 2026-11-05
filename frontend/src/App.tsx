@@ -10,6 +10,7 @@ import { getMenuAccessFallbackPath, isPathBlockedForUser } from '@/config/naviga
 import { useMenuVisibilityStore } from '@/store/menuVisibilityStore'
 import { applyThemeSettings, initializeThemeMode } from '@/utils/theme'
 import type { DisclaimerSettings } from '@/types'
+import { useHorizontalDragScroll } from '@/hooks/useHorizontalDragScroll'
 
 // 登录/注册页面保持同步导入（首屏必需）
 import { Login } from '@/pages/auth/Login'
@@ -265,6 +266,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 function App() {
+  useHorizontalDragScroll()
   const { setIsExeMode } = useMenuVisibilityStore()
 
   useEffect(() => {

@@ -4,7 +4,7 @@
 
 ## 启动
 
-macOS 双击 **启动鱼太咸.command**，启动完成后会打开 <http://127.0.0.1:9999>。停止时双击 **停止鱼太咸.command**。
+macOS 双击 **启动鱼太咸.command**：未运行时直接启动，已运行时先安全停止全部本地服务，再重新启动，无需先点击停止脚本。启动完成后会打开 <http://127.0.0.1:9999>。只需停止时，双击 **停止鱼太咸.command**。
 
 首次运行需要联网，脚本会准备 Homebrew、Python、Node.js、MySQL、Redis 和浏览器组件。支持 macOS 与 Homebrew Linux，不需要 Docker。Homebrew 安装可能要求输入电脑的系统密码；下载中断后重新运行即可。
 

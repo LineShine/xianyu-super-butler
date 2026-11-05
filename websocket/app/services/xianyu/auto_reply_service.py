@@ -622,6 +622,8 @@ class AutoReplyService:
             parsed_message: 解析后的消息数据
             websocket: WebSocket连接
         """
+        from app.services.xianyu import code_timing
+        code_timing.receipt(parsed_message)
         log_payload = self._build_auto_reply_log_payload(parsed_message)
         reply_trace_token = self._reply_trace_var.set(log_payload)
         try:
@@ -640,8 +642,12 @@ class AutoReplyService:
                 raw_message = parsed_message.get("raw_message") or {}
                 message_body = raw_message.get("1", {}) if isinstance(raw_message, dict) else {}
                 timestamp_ms = message_body.get("5") if isinstance(message_body, dict) else None
+                from common.services.code_generation_config import AUTOMATIC_ECHO_WINDOW_MS
+                seller_command = is_seller_command(parsed_message, myid)
                 if outgoing_message_tracker.consume_echo(
-                    self.cookie_id, chat_id, send_message, timestamp_ms
+                    self.cookie_id, chat_id, send_message,
+                    None if seller_command else timestamp_ms,
+                    max_age_seconds=AUTOMATIC_ECHO_WINDOW_MS / 1000 if seller_command else None,
                 ):
                     log_payload["process_status"] = "skipped"
                     log_payload["decision_reason"] = "automatic_message_echo"

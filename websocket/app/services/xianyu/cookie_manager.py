@@ -442,11 +442,17 @@ class CookieManager:
                 connection_state = instance.connection_state.value
                 is_connected = connection_state == "connected"
         
+        health = getattr(instance, 'message_sync_health', None)
+        health_status = health.status() if health else {}
+        if health_status.get('relogin_required'):
+            is_connected = False
+            connection_state = 'message_sync_failed'
         return {
             "status": "running" if not task.done() else "stopped",
             "running": not task.done(),
             "connection_state": connection_state,
             "is_connected": is_connected,
+            **health_status,
         }
 
     def get_connection_stats(self) -> dict:
@@ -461,6 +467,7 @@ class CookieManager:
         by_state: dict = {}
         connected_ids = []
         total = 0
+        account_health = {}
         for cookie_id, instance in list(self.instances.items()):
             total += 1
             conn_mgr = getattr(instance, 'connection_manager', None)
@@ -468,6 +475,11 @@ class CookieManager:
                 state = conn_mgr.connection_state.value
             else:
                 state = "unknown"
+            health = getattr(instance, 'message_sync_health', None)
+            if health:
+                account_health[cookie_id] = health.status()
+                if health.unhealthy:
+                    state = 'message_sync_failed'
             by_state[state] = by_state.get(state, 0) + 1
             if state == "connected":
                 connected_ids.append(cookie_id)
@@ -477,6 +489,7 @@ class CookieManager:
             "connected": by_state.get("connected", 0),  # 真实 WebSocket 已连接数
             "by_state": by_state,               # 各连接状态明细
             "connected_account_ids": connected_ids,
+            "account_health": account_health,
         }
 
     async def start_all_tasks(self):

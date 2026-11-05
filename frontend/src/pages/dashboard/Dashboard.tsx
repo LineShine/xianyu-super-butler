@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { Activity, Calendar, MessageSquare, RefreshCw, Shield, ShoppingCart, Users, Package, Clock } from 'lucide-react'
 import { getAccountStats } from '@/api/accounts'
@@ -19,6 +19,23 @@ interface DashboardStats {
   remainingAccountCount: number | null
 }
 
+const PERIODS = [
+  { value: 'today', label: '今日' }, { value: 'yesterday', label: '昨天' },
+  { value: 'beforeYesterday', label: '前天' }, { value: '7', label: '近7天' },
+  { value: '30', label: '近30天' }, { value: 'custom', label: '自定义' },
+] as const
+type Period = typeof PERIODS[number]['value']
+const formatDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+const periodRange = (period: Period) => {
+  const end = new Date()
+  end.setHours(0, 0, 0, 0)
+  if (period === 'yesterday') end.setDate(end.getDate() - 1)
+  if (period === 'beforeYesterday') end.setDate(end.getDate() - 2)
+  const start = new Date(end)
+  if (period === '7' || period === '30') start.setDate(start.getDate() - Number(period) + 1)
+  return { start_date: formatDate(start), end_date: formatDate(end) }
+}
+
 export function Dashboard() {
   const { addToast } = useUIStore()
   const { isAuthenticated, token, _hasHydrated, user } = useAuthStore()
@@ -37,6 +54,44 @@ export function Dashboard() {
   })
   const [adminStats, setAdminStats] = useState<AdminStats | null>(null)
   const [todayStats, setTodayStats] = useState<TodayStats | null>(null)
+
+  const [period, setPeriod] = useState<Period>('today')
+  const [customRange, setCustomRange] = useState(() => periodRange('today'))
+  const [appliedCustomRange, setAppliedCustomRange] = useState(customRange)
+  const [periodLoading, setPeriodLoading] = useState(true)
+  const [trendRefreshKey, setTrendRefreshKey] = useState(0)
+  const periodRequestId = useRef(0)
+  const periodLabel = PERIODS.find((option) => option.value === period)!.label
+  const statsPrefix = period === 'custom' ? '所选期间' : periodLabel
+
+  const loadPeriodStats = async () => {
+    if (!_hasHydrated || !isAuthenticated || !token || !user?.is_admin) return
+    const id = ++periodRequestId.current
+    setPeriodLoading(true)
+    const result = await getTodayStats(period === 'custom' ? appliedCustomRange : periodRange(period))
+    if (id !== periodRequestId.current) return
+    setTodayStats(result.success && result.data ? result.data : null)
+    setPeriodLoading(false)
+    if (!result.success) addToast({ type: 'error', message: '加载日期范围统计失败，请重试' })
+  }
+
+  useEffect(() => {
+    loadPeriodStats()
+    return () => { periodRequestId.current += 1 }
+  }, [_hasHydrated, isAuthenticated, token, user?.is_admin, period, appliedCustomRange])
+
+  const refreshPeriodStats = () => {
+    loadPeriodStats()
+    setTrendRefreshKey((value) => value + 1)
+  }
+
+  const applyCustomRange = () => {
+    if (!customRange.start_date || !customRange.end_date || customRange.start_date > customRange.end_date) {
+      addToast({ type: 'warning', message: '请选择有效日期，结束日期不能早于开始日期' })
+      return
+    }
+    setAppliedCustomRange({ ...customRange })
+  }
 
   /** 加载基础统计数据 */
   const loadStats = async () => {
@@ -72,15 +127,9 @@ export function Dashboard() {
     }
     try {
       setAdminStatsLoading(true)
-      const [adminResult, todayResult] = await Promise.all([
-        getAdminStats(),
-        getTodayStats(),
-      ])
+      const adminResult = await getAdminStats()
       if (adminResult.success && adminResult.data) {
         setAdminStats(adminResult.data)
-      }
-      if (todayResult.success && todayResult.data) {
-        setTodayStats(todayResult.data)
       }
     } catch {
       // ignore
@@ -96,6 +145,11 @@ export function Dashboard() {
     // 异步独立加载各个模块，不互相等待
     loadStats()
     loadAdminStats()
+  }
+
+  const refreshDashboard = () => {
+    loadDashboard()
+    refreshPeriodStats()
   }
 
   useEffect(() => {
@@ -186,7 +240,7 @@ export function Dashboard() {
           <h1 className="page-title">仪表盘</h1>
           <p className="page-description">系统概览和统计信息</p>
         </div>
-        <button onClick={loadDashboard} className="btn-ios-secondary">
+        <button onClick={refreshDashboard} title="刷新全部统计和金额趋势" className="btn-ios-secondary">
           <RefreshCw className="w-4 h-4" />
           <span className="hidden sm:inline">刷新数据</span>
           <span className="sm:hidden">刷新</span>
@@ -297,7 +351,7 @@ export function Dashboard() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.35, duration: 0.3 }}
       >
-        <OrderAmountChart />
+        <OrderAmountChart refreshKey={trendRefreshKey} />
       </motion.div>
 
       {/* Today Stats - 今日统计（管理员专属） */}
@@ -308,14 +362,36 @@ export function Dashboard() {
           transition={{ delay: 0.4, duration: 0.3 }}
           className="vben-card"
         >
-          <div className="vben-card-header">
+          <div className="vben-card-header flex flex-wrap items-center justify-between gap-3">
             <h2 className="vben-card-title flex items-center gap-2">
               <Calendar className="w-4 h-4" />
-              今日统计（管理员）
+              {statsPrefix}统计（管理员）
             </h2>
+            <div className="flex flex-wrap items-center gap-3">
+              <div role="group" aria-label="统计日期范围" className="inline-flex flex-wrap overflow-hidden rounded-lg border border-slate-300 dark:border-slate-600">
+                {PERIODS.map((option) => (
+                  <button key={option.value} type="button" aria-pressed={period === option.value}
+                    onClick={() => setPeriod(option.value)}
+                    className={`px-3 py-2 text-sm transition-colors sm:px-4 ${period === option.value ? 'bg-[#ffeb00] font-medium text-slate-900' : 'bg-white text-slate-600 hover:bg-slate-50 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700'}`}>
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <button type="button" title="刷新统计和金额趋势" aria-label="刷新统计和金额趋势" onClick={refreshPeriodStats}
+                disabled={periodLoading} className="rounded-lg border border-slate-200 p-2 text-slate-500 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:hover:bg-slate-700">
+                <RefreshCw className={`h-4 w-4 ${periodLoading ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
+            {period === 'custom' && <div className="flex w-full flex-wrap items-center gap-2 text-sm">
+              <input type="date" aria-label="开始日期" value={customRange.start_date} onChange={(event) => setCustomRange((current) => ({ ...current, start_date: event.target.value }))} className="input-ios w-auto" />
+              <span>至</span>
+              <input type="date" aria-label="结束日期" value={customRange.end_date} onChange={(event) => setCustomRange((current) => ({ ...current, end_date: event.target.value }))} className="input-ios w-auto" />
+              <button type="button" onClick={applyCustomRange} className="btn-ios-primary">查询</button>
+              <span className="text-xs text-slate-400">当前统计：{appliedCustomRange.start_date} 至 {appliedCustomRange.end_date}</span>
+            </div>}
           </div>
           <div className="vben-card-body">
-            {adminStatsLoading ? (
+            {periodLoading ? (
               <div className="flex items-center justify-center py-8">
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" />
               </div>
@@ -326,21 +402,21 @@ export function Dashboard() {
                     <Users className="w-5 h-5 text-blue-500" />
                   </div>
                   <p className="text-2xl font-bold text-blue-600">{todayStats.today_users}</p>
-                  <p className="text-sm text-slate-500">今日新增用户</p>
+                  <p className="text-sm text-slate-500">{statsPrefix}新增用户</p>
                 </div>
                 <div className="text-center p-3 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-100 dark:border-green-800">
                   <div className="flex items-center justify-center mb-2">
                     <Activity className="w-5 h-5 text-green-500" />
                   </div>
                   <p className="text-2xl font-bold text-green-600">{todayStats.today_accounts}</p>
-                  <p className="text-sm text-slate-500">今日新增账号</p>
+                  <p className="text-sm text-slate-500">{statsPrefix}新增账号</p>
                 </div>
                 <div className="text-center p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-100 dark:border-purple-800">
                   <div className="flex items-center justify-center mb-2">
                     <ShoppingCart className="w-5 h-5 text-purple-500" />
                   </div>
                   <p className="text-2xl font-bold text-purple-600">{todayStats.today_orders}</p>
-                  <p className="text-sm text-slate-500">今日订单</p>
+                  <p className="text-sm text-slate-500">{statsPrefix}订单</p>
                 </div>
                 
                 <div className="text-center p-3 bg-rose-50 dark:bg-rose-900/20 rounded-lg border border-rose-100 dark:border-rose-800">
@@ -348,24 +424,24 @@ export function Dashboard() {
                     <span className="text-rose-500 text-xl font-bold">￥</span>
                   </div>
                   <p className="text-2xl font-bold text-rose-600">¥{todayStats.today_amount?.toFixed(2) || '0.00'}</p>
-                  <p className="text-sm text-slate-500">今日订单金额</p>
+                  <p className="text-sm text-slate-500">{statsPrefix}订单金额</p>
                 </div>
                 <div className="text-center p-3 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg border border-emerald-100 dark:border-emerald-800">
                   <div className="flex items-center justify-center mb-2">
                     <Package className="w-5 h-5 text-emerald-500" />
                   </div>
                   <p className="text-2xl font-bold text-emerald-600">{todayStats.today_shipped}</p>
-                  <p className="text-sm text-slate-500">今日已发货</p>
+                  <p className="text-sm text-slate-500">{statsPrefix}已发货</p>
                 </div>
                 <div className="text-center p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-100 dark:border-amber-800">
                   <div className="flex items-center justify-center mb-2">
                     <Clock className="w-5 h-5 text-amber-500" />
                   </div>
                   <p className="text-2xl font-bold text-amber-600">{todayStats.today_pending}</p>
-                  <p className="text-sm text-slate-500">今日待处理</p>
+                  <p className="text-sm text-slate-500">{statsPrefix}待处理</p>
                 </div>
               </div>
-            ) : null}
+            ) : <p className="py-8 text-center text-sm text-slate-400">统计加载失败，请点击刷新重试</p>}
           </div>
         </motion.div>
       )}

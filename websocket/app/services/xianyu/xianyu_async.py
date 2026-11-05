@@ -144,6 +144,8 @@ class XianyuAsync:
         # 用于 /r/SingleChatConversation/create 等需要拿响应结果的请求
         self._pending_mid_futures: Dict[str, asyncio.Future] = {}
         self._registered_ws = None
+        from app.services.xianyu.message_sync_health import MessageSyncHealth
+        self.message_sync_health = MessageSyncHealth(self)
         
         # Session
         self.session = None
@@ -1043,6 +1045,9 @@ class XianyuAsync:
                 self.message_handler.set_card_update_message_handler(on_card_update_message)
             
             # 处理消息
+            health = getattr(self, 'message_sync_health', None)
+            if health:
+                self.message_handler.message_observer = health.observe
             await self.message_handler.handle_message(message_data, websocket, acknowledge=acknowledge)
             
         except Exception as e:
@@ -2910,6 +2915,9 @@ class XianyuAsync:
     
     async def _cancel_background_tasks(self):
         """取消并清理所有后台任务"""
+        health = getattr(self, 'message_sync_health', None)
+        if health:
+            await health.stop()
         tasks_to_cancel = []
         
         if self.heartbeat_task and not self.heartbeat_task.done():
@@ -3165,6 +3173,7 @@ class XianyuAsync:
                             self.connection_manager.connection_failures = 0
                             self.connection_manager.network_failures = 0  # 成功连接后重置网络错误计数
                             self.connection_manager.last_successful_connection = time.time()
+                            self.message_sync_health.start(websocket)
                             self._connection_start_time = time.time()  # 记录连接开始时间
                             
                             # 启动后台任务

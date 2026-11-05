@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -261,9 +261,15 @@ async def get_system_stats(current_user: User=Depends(deps.get_current_admin_use
     return {'success': True, **stats}
 
 @router.get('/stats/today')
-async def get_today_stats(_: User=Depends(deps.get_current_admin_user), session: AsyncSession=Depends(deps.get_db_session)) -> dict:
-    """获取今日统计信息（管理员专用）"""
-    stats = await DashboardStatsService(session).get_admin_today_stats()
+async def get_today_stats(
+    start_date: date | None = Query(None), end_date: date | None = Query(None),
+    _: User = Depends(deps.get_current_admin_user), session: AsyncSession = Depends(deps.get_db_session),
+) -> dict:
+    """获取日期范围统计（管理员专用），不传日期时默认今日。"""
+    try:
+        stats = await DashboardStatsService(session).get_admin_today_stats(start_date=start_date, end_date=end_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {'success': True, **stats}
 
 @router.get('/log-files')

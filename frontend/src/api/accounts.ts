@@ -63,6 +63,9 @@ export const getAccountDetailsPaginated = async (
     value: string
     enabled: boolean
     online?: boolean
+    message_sync_status?: AccountDetail['message_sync_status']
+    offline_reason?: string
+    relogin_required?: boolean
     auto_confirm: boolean
     scheduled_redelivery?: boolean
     scheduled_rate?: boolean
@@ -140,6 +143,9 @@ export const getAccountDetailsPaginated = async (
       cookie: item.value,
       enabled: item.enabled,
       online: item.online ?? false,
+      message_sync_status: item.message_sync_status,
+      offline_reason: item.offline_reason,
+      relogin_required: item.relogin_required,
       auto_confirm: item.auto_confirm,
       scheduled_redelivery: item.scheduled_redelivery || false,
       scheduled_rate: item.scheduled_rate || false,

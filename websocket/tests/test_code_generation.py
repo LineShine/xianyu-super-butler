@@ -16,6 +16,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.services.xianyu import code_generation_service as commands
+from app.services.xianyu import code_timing
 from app.services.xianyu.auto_reply_service import AutoReplyService
 from app.services.xianyu.message_handler import MessageHandler
 from app.services.xianyu.outgoing_message_tracker import OutgoingMessageTracker
@@ -142,11 +143,31 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         self.runner.assert_not_awaited()
         self.instance.send_msg.assert_not_awaited()
 
-    async def test_missing_old_future_or_pre_enable_time_never_runs(self):
-        for n, timestamp in enumerate((0, '', True, 'NaN', self.now - 301000, self.now + 50000, self.now - 3000)):
+    async def test_invalid_source_timestamp_never_runs(self):
+        for n, timestamp in enumerate((0, '', True, 'NaN', 10 ** 30)):
             await self.service.handle(message(mid=str(n), timestamp=timestamp), self.ws)
-        self.assertEqual(len(self.records()), 7)
+        self.assertEqual(len(self.records()), 5)
         self.runner.assert_not_awaited()
+
+    async def test_local_clock_forward_backward_and_change_during_generation(self):
+        for index, offset in enumerate((30 * 86400, -30 * 86400)):
+            event = message(mid=f'local-{index}', timestamp=self.now)
+            with patch.object(code_timing.time, 'time', return_value=self.now / 1000 + offset):
+                async def generate():
+                    # The machine can change its date again while this command is running.
+                    code_timing.time.time.return_value += 86400
+                    return 'aB09zZ'
+                self.runner.side_effect = generate
+                await self.service.handle(event, self.ws)
+        self.assertEqual(self.runner.await_count, 2)
+        self.assertTrue(all(row.send_status == 'success' for row in self.records()))
+
+    async def test_expired_local_receipt_never_runs_even_with_fresh_platform_time(self):
+        event = message()
+        event['_code_receipt'] = code_timing.Receipt(self.now, time.monotonic() - 301)
+        await self.service.handle(event, self.ws)
+        self.runner.assert_not_awaited()
+        self.assertEqual(self.records()[-1].decision_reason, 'code_stale')
 
     async def test_closed_item_and_disabled_account_never_runs(self):
         self.modify_item(**{ENABLED_KEY: False})

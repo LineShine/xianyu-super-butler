@@ -23,6 +23,7 @@ from common.models.ytx_account import YtxAccount
 from common.models.ytx_catalog_item import YtxCatalogItem
 from common.models.ytx_order import YtxOrder
 from common.services import code_generation_config as config
+from app.services.xianyu import code_timing
 from common.services.code_order_entitlement import check_order_entitlement
 from app.services.xianyu.code_generation_service import (
     Claim, CodeGenerationService, CommandStopped, conversation_lock,
@@ -35,6 +36,7 @@ PROCESSING = '已收到，正在自动处理ing...'
 SCRIPT_ERROR = '机器人回复：自动处理失败，请稍后重试或联系卖家'
 LIMIT_HINT = '该订单今日已领取超过限制'
 WINDOW_MS = 300_000
+COOLDOWN_MS = 180_000
 BUSY_MS = 90_000
 DAILY_LIMIT = 3
 ACTIVE = {'prompting', 'waiting', 'checking', 'notifying'}
@@ -42,7 +44,7 @@ COUNTED = {'reserved', 'success', 'unknown'}
 
 
 def now_ms() -> int:
-    return int(time.time() * 1000)
+    return code_timing.now_ms()
 
 
 def quota_day(timestamp: int) -> str:
@@ -101,8 +103,9 @@ class CodeSelfService:
         timestamp = original_timestamp(message)
         if not seller or not buyer_envelope(message, seller):
             return False
-        if timestamp is None or not 0 <= now_ms() - timestamp <= WINDOW_MS:
-            # Old replayed messages cannot start a flow or consume a pending one.
+        received = code_timing.receipt(message)
+        if timestamp is None or not code_timing.is_recent(received, WINDOW_MS):
+            # Original timestamps identify source messages; local receipt age controls processing.
             return False
         consumed, action = await self._accept(message)
         if action is None:
@@ -176,7 +179,7 @@ class CodeSelfService:
         return attempt, log
 
     async def _recover(self, db, attempt, now):
-        if attempt and attempt.finished_ms is None and attempt.busy_until_ms <= now:
+        if attempt and attempt.finished_ms is None and not 0 < attempt.busy_until_ms - now <= BUSY_MS:
             if attempt.quota_state == 'reserved':
                 attempt.quota_state = 'unknown' if attempt.stage == 'sending' else 'released'
             attempt.reason = 'code_interrupted'
@@ -201,12 +204,12 @@ class CodeSelfService:
             key = hashlib.sha256(json.dumps([account.id, chat, source_key(message)]).encode()).hexdigest()
             flow = (await db.execute(select(Flow).where(Flow.account_pk == account.id, Flow.chat_id == chat)
                                      .with_for_update())).scalars().first()
-            if flow and flow.state in ACTIVE - {'waiting'} and flow.busy_until_ms <= now:
+            if flow and flow.state in ACTIVE - {'waiting'} and not 0 < flow.busy_until_ms - now <= BUSY_MS:
                 previous = (await db.execute(select(Attempt).where(Attempt.id == flow.active_attempt_id)
                                              .with_for_update())).scalars().first()
                 await self._recover(db, previous, now)
                 flow.state = 'finished'
-            if flow and flow.state == 'waiting' and now >= flow.expires_ms:
+            if flow and flow.state == 'waiting' and not 0 < flow.expires_ms - now <= WINDOW_MS:
                 flow.state = 'finished'
             existing = (await db.execute(select(Attempt.id).where(Attempt.id == key).with_for_update())).first()
             if existing:
@@ -227,8 +230,8 @@ class CodeSelfService:
                         or any(not config.enabled(i.metadata_json) or i.metadata_json.get(config.ENABLED_AT_KEY) != flow.enabled_at_ms for i in items)):
                     flow.state = 'finished'
                     reason, detail = 'code_disabled', '会话归属或商品开关已变化，本轮已结束'
-                elif timestamp < flow.started_ms or explicit_items(message) - {flow.item_id}:
-                    reason, detail = 'code_context', '消息早于本轮开始或商品不匹配'
+                elif explicit_items(message) - {flow.item_id}:
+                    reason, detail = 'code_context', '消息商品不匹配'
                 elif flow.state != 'waiting':
                     reason = 'code_flow_busy'
                 elif plain and re.fullmatch(r'[0-9]{1,64}', message.get('send_message', '')):
@@ -238,7 +241,7 @@ class CodeSelfService:
                     # 重复推送已由上方 Attempt 去重；提示不延长本轮等待时间。
                     flow.reminded = True
                     kind = 'format'
-            elif flow and now < flow.cooldown_until_ms:
+            elif flow and 0 < flow.cooldown_until_ms - now <= COOLDOWN_MS:
                 reason = 'code_keyword_cooldown'
             else:
                 try:
@@ -248,8 +251,8 @@ class CodeSelfService:
                         # Disabled goods retain the usual AI/keyword reply behavior.
                         await db.commit()
                         return False, None
-                    if any(not config.message_allowed(i.metadata_json, timestamp, now) for i in items):
-                        raise CommandStopped('code_stale', '消息早于商品本次开启时间')
+                    if any(type(i.metadata_json.get(config.ENABLED_AT_KEY)) is not int for i in items):
+                        raise CommandStopped('code_stale', '商品缺少有效的口令开启版本')
                     enabled_at = items[0].metadata_json[config.ENABLED_AT_KEY]
                     if any(i.metadata_json[config.ENABLED_AT_KEY] != enabled_at for i in items):
                         raise CommandStopped('code_context', '商品配置不一致')
@@ -258,7 +261,8 @@ class CodeSelfService:
                         db.add(flow)
                     flow.owner_id, flow.buyer_id, flow.item_id = account.owner_id, buyer, item_id
                     flow.enabled_at_ms, flow.started_ms = enabled_at, now
-                    flow.expires_ms = flow.cooldown_until_ms = now + WINDOW_MS
+                    flow.expires_ms = now + WINDOW_MS
+                    flow.cooldown_until_ms = now + COOLDOWN_MS
                     flow.reminded = False
                     kind = 'prompt'
                 except CommandStopped as exc:
@@ -272,7 +276,7 @@ class CodeSelfService:
                 attempt.order_no = message['send_message'] if kind == 'order' else None
                 log.order_no = attempt.order_no
                 action = Action(kind, key, Claim(log.id, account.id, account.owner_id, chat, buyer,
-                    flow.item_id, flow.enabled_at_ms, timestamp), attempt.order_no)
+                    flow.item_id, flow.enabled_at_ms, timestamp, code_timing.receipt(message)), attempt.order_no)
             else:
                 attempt.finished_ms = now
             await db.commit()  # No send or subprocess can happen before the durable claim.
@@ -312,6 +316,8 @@ class CodeSelfService:
                     if outcome.detail:
                         log.send_fail_reason = outcome.detail
             if end_state:
+                if values.get('quota_state') in ('success', 'unknown'):
+                    flow.cooldown_until_ms = now_ms() + COOLDOWN_MS
                 flow.state = end_state if now_ms() < flow.expires_ms else 'finished'
                 flow.busy_until_ms = 0
                 attempt.finished_ms = now_ms()
@@ -341,7 +347,9 @@ class CodeSelfService:
             raise CommandStopped('code_busy', '会话锁已失效')
         await self.generator._recheck(action.claim)
         await self._update(action, stage=stage,
-            **({'marker_at_ms': now_ms()} if stage == 'marker' else {}))
+            # 回传匹配使用平台时间坐标，避免电脑改时后自动“口令生成”被当作人工指令。
+            **({'marker_at_ms': action.claim.timestamp_ms + int((time.monotonic() - action.claim.received.monotonic) * 1000)}
+               if stage == 'marker' else {}))
         outcome = await self.generator.send_text_confirmed(action.claim, text, websocket)
         await self._update(action, outcome=outcome, sent_text=text)
         if outcome.status != 'success':
@@ -351,7 +359,7 @@ class CodeSelfService:
     async def _reserve(self, action, *, dispatch=False):
         """Lock the account row before reading quota; never hold a DB lock over network IO."""
         now, used, latest = now_ms(), 0, 0
-        day = quota_day(now)
+        day = quota_day(int(time.time() * 1000))
         async with async_session_maker() as db:
             account = await self._account(db)
             if not account or account.id != action.claim.account_pk or account.owner_id != action.claim.owner_id:
@@ -363,7 +371,7 @@ class CodeSelfService:
             for row in rows:
                 if row.id == action.attempt_id:
                     continue
-                if row.quota_state == 'reserved' and row.busy_until_ms <= now:
+                if row.quota_state == 'reserved' and not 0 < row.busy_until_ms - now <= BUSY_MS:
                     await self._recover(db, row, now)
                 if row.quota_state not in COUNTED:
                     continue
@@ -376,9 +384,9 @@ class CodeSelfService:
             if used >= DAILY_LIMIT:
                 await db.commit()
                 return LIMIT_HINT, 'code_daily_limit'
-            if latest and now < latest + WINDOW_MS:
+            if latest and 0 <= now - latest < COOLDOWN_MS:
                 await db.commit()
-                return f'请等待 {math.ceil((latest + WINDOW_MS - now) / 1000)} 秒后再领取口令', 'code_order_cooldown'
+                return f'请等待 {math.ceil((latest + COOLDOWN_MS - now) / 1000)} 秒后再领取口令', 'code_order_cooldown'
             attempt = (await db.execute(select(Attempt).where(Attempt.id == action.attempt_id).with_for_update())).scalars().one()
             attempt.quota_day, attempt.quota_state, attempt.quota_used = day, 'reserved', used + 1
             attempt.stage = 'sending' if dispatch else 'reserved'
