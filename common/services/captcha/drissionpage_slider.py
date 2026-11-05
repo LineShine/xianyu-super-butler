@@ -80,9 +80,11 @@ class DrissionPageSliderService:
         self.pure_user_id = concurrency_manager._extract_pure_user_id(user_id)
 
         # 方案 A：复用 Playwright 引擎的同一本地化目录
-        self.user_data_dir = user_data_dir or os.path.join(
-            os.getcwd(), "browser_data", f"user_{self.pure_user_id}"
-        )
+        import tempfile
+        root = os.environ.get("YTX_BROWSER_ROOT", os.path.join(os.getcwd(), "browser_data", __import__("sys").platform))
+        os.makedirs(root, exist_ok=True)
+        self._private_profile = tempfile.TemporaryDirectory(prefix="drission-", dir=root) if not user_data_dir else None
+        self.user_data_dir = user_data_dir or self._private_profile.name
         os.makedirs(self.user_data_dir, exist_ok=True)
 
         self.browser = None
@@ -154,7 +156,6 @@ class DrissionPageSliderService:
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
-            "--disable-web-security",
             "--disable-features=VizDisplayCompositor",
             "--disable-blink-features=AutomationControlled",
             "--disable-extensions",
@@ -405,6 +406,9 @@ class DrissionPageSliderService:
                 finally:
                     self._account_lock_acquired = False
             self._release_slot()
+            if self._private_profile is not None:
+                self._private_profile.cleanup()
+                self._private_profile = None
 
 
 def run_drissionpage_verification(

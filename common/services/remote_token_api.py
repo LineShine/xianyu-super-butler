@@ -92,8 +92,8 @@ def validate_remote_token_settings(url: str, secret_key: str) -> str | None:
         return "请选择远程接口时必须填写秘钥"
 
     parsed = urlparse(clean_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return "远程URL格式无效，请填写以 http:// 或 https:// 开头的完整地址"
+    if parsed.scheme != "https" or not parsed.netloc:
+        return "远程URL格式无效，请填写以 https:// 开头的完整地址"
     return None
 
 
@@ -251,6 +251,7 @@ async def request_remote_xianyu_token(
             str(url).strip(),
             json=_build_remote_token_payload(cookies),
             headers={"X-API-Key": str(secret_key).strip()},
+            allow_redirects=False,
             timeout=aiohttp.ClientTimeout(total=timeout_seconds),
         ) as response:
             response_json = await response.json(content_type=None)
@@ -308,6 +309,7 @@ def request_remote_xianyu_token_sync(
         str(url).strip(),
         json=_build_remote_token_payload(cookies),
         headers={"X-API-Key": str(secret_key).strip()},
+        allow_redirects=False,
         timeout=timeout_seconds,
     )
     return _parse_remote_token_response(

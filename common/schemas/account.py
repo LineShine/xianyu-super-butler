@@ -8,7 +8,8 @@
 """
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Literal
+from pydantic import BaseModel, Field, model_validator
 
 
 class AccountDetail(BaseModel):
@@ -40,7 +41,9 @@ class AccountDetail(BaseModel):
     message_expire_time: int | None = None
     reply_delay_seconds: int | None = None
     username: str | None = None
-    login_password: str | None = None
+    has_password: bool = False
+    has_cookie: bool = False
+    credential_status: str = "ready"
     show_browser: bool = False
     disable_reason: str | None = None
     filter_count: int = 0  # 消息过滤规则数量
@@ -62,7 +65,14 @@ class AccountCreate(BaseModel):
 
 
 class AccountCookieUpdate(BaseModel):
-    value: str = Field(..., description="Updated cookie text")
+    value: str | None = Field(None, description="仅写入的新 Cookie")
+    cookie_action: Literal["preserve", "replace", "clear"] = "replace"
+
+    @model_validator(mode="after")
+    def validate_cookie_action(self):
+        if self.cookie_action == "replace" and not self.value:
+            raise ValueError("替换 Cookie 时必须提供新值")
+        return self
 
 
 class AccountStatusUpdate(BaseModel):
@@ -93,7 +103,16 @@ class AccountPauseDurationUpdate(BaseModel):
 class AccountLoginInfoUpdate(BaseModel):
     """账号登录信息更新"""
     username: str | None = Field(None, description="登录用户名")
-    login_password: str | None = Field(None, description="登录密码")
+    login_password: str | None = Field(None, description="仅写入的新密码")
+    password_action: Literal["preserve", "replace", "clear"] = "preserve"
+
+    @model_validator(mode="after")
+    def validate_password_action(self):
+        if self.password_action == "replace" and not self.login_password:
+            raise ValueError("替换密码时必须提供新密码")
+        if self.password_action != "replace" and self.login_password:
+            raise ValueError("提交新密码时必须选择替换")
+        return self
     show_browser: bool | None = Field(None, description="是否显示浏览器")
 
 

@@ -83,8 +83,11 @@ def main() -> int:
             probe.bind(("127.0.0.1", listen_port))
         process_env = os.environ.copy()
         process_env.update(env)
+        from deployment import instance_environment
+        process_env.update(instance_environment(ROOT))
+        process_env["YTX_LOG_DIR"] = str(ROOT / "yutaixian_data/logs/native" / service)
         process_env["PYTHONPATH"] = os.pathsep.join((str(ROOT / service), str(ROOT)))
-        # Browser profiles use cwd/browser_data; share Docker's existing profiles.
+        # Runtime browser profiles are platform-isolated; credentials remain shared.
         workdir = Path(bind_source(config["services"]["websocket"], "/app/browser_data")).parent
         workdir.mkdir(parents=True, exist_ok=True)
         os.chdir(workdir)

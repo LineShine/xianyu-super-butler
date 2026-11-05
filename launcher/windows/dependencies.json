@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "platform": "windows-x86_64",
+  "status": "framework-requires-windows-validation",
+  "dependencies": [
+    {"name": "python", "version": "3.12", "source": "https://www.python.org/downloads/windows/", "sha256": null},
+    {"name": "node", "version": "22", "source": "https://nodejs.org/en/download", "sha256": null},
+    {"name": "mysql", "version": "8.4", "source": "https://dev.mysql.com/downloads/mysql/", "sha256": null},
+    {"name": "redis", "version": null, "source": null, "sha256": null, "note": "Select a maintained Windows community build, pin exact release and SHA256 on Windows; do not download until verified."},
+    {"name": "inno-setup", "version": "6", "source": "https://jrsoftware.org/isinfo.php", "sha256": null}
+  ],
+  "python_lockfiles": ["backend-web/requirements.lock", "websocket/requirements.lock", "scheduler/requirements.lock"],
+  "browser_installers": ["playwright install chromium", "patchright install chromium"],
+  "download_policy": "HTTPS, exact version and SHA256 mandatory; missing digest fails closed"
+}

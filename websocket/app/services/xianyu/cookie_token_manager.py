@@ -1,3 +1,4 @@
+from common.security.vault import encrypt, decrypt, token_context, CredentialUnavailable
 """
 Cookie/Token管理模块
 负责处理Cookie和Token相关的所有逻辑，包括：
@@ -353,6 +354,9 @@ class CookieTokenManager:
                         "expired_fallback": True,
                         "expired_fallback_reason": expired_cache_reason,
                     }
+        except CredentialUnavailable:
+            self._last_cache_lookup_succeeded = False
+            raise
         except Exception as e:
             self._last_cache_lookup_succeeded = False
             logger.warning(f"【{self.cookie_id}】获取Token缓存失败: {e}")
@@ -461,7 +465,7 @@ class CookieTokenManager:
                     """),
                     {
                         "user_id": self.myid,
-                        "token": token,
+                        "token": encrypt(token, token_context(self.myid)),
                         "device_id": device_id,
                         "expire_at": expire_at
                     }
@@ -1289,7 +1293,7 @@ class CookieTokenManager:
                 f"状态码={api_result.status_code}, 耗时={api_result.duration_seconds:.2f}秒"
             )
             res_json = api_result.response_json
-            logger.info(f"【{self.cookie_id}】Token刷新响应: {json.dumps(res_json, ensure_ascii=False)[:500]}")
+            logger.info(f"【{self.cookie_id}】Token刷新响应: {res_json.get('ret', [])}")
 
             # 检查并更新Cookie
             new_cookies = api_result.response_cookies
@@ -1463,7 +1467,7 @@ class CookieTokenManager:
             except Exception as retry_e:
                 logger.warning(f"【{self.cookie_id}】令牌过期重试判断异常: {self._safe_str(retry_e)}")
 
-            logger.error(f"【{self.cookie_id}】Token刷新失败: {res_json}")
+            logger.error(f"【{self.cookie_id}】Token刷新失败: {res_json.get('ret', [])}")
             self.current_token = None
             self.last_token_refresh_status = "failed_api"
             await self._delete_cached_token()
@@ -1472,6 +1476,10 @@ class CookieTokenManager:
                 await self.send_token_refresh_notification(f"Token刷新失败: {res_json}", "token_refresh_failed")
             return None
 
+        except CredentialUnavailable:
+            logger.error(f"【{self.cookie_id}】凭据不可解密，暂停取密；保留密文和账号启用状态")
+            self.last_token_refresh_status = "skipped_cooldown"
+            return None
         except asyncio.TimeoutError:
             logger.error(f"【{self.cookie_id}】Token刷新API请求超时（30秒）")
             self.current_token = None
@@ -1731,7 +1739,7 @@ class CookieTokenManager:
                 
                 new_cookies_str = '; '.join([f"{k}={v}" for k, v in result.items()])
                 # 记录密码登录获取到的新cookies
-                logger.info(f"【{self.cookie_id}】[密码登录获取的新Cookies] {new_cookies_str}")
+                logger.info(f"【{self.cookie_id}】密码登录凭据已更新（内容不记录）")
                 
                 # 记录密码登录时间
                 if hasattr(self.parent, '_last_password_login_time'):
@@ -1764,6 +1772,10 @@ class CookieTokenManager:
                 _record_login_log("failed", "login_no_cookie_returned", err_msg)
                 return False
 
+        except CredentialUnavailable:
+            logger.error(f"【{self.cookie_id}】凭据不可解密，暂停自动登录；不按未配置账密处理")
+            _record_login_log("failed", "credential_unavailable", "凭据校验失败，请恢复原密钥；账号配置未改变")
+            return "skipped_cooldown"
         except Exception as refresh_e:
             # ============== baxia-punish 风控图形滑块特殊处理 ==============
             # 该异常表示账号本身正常，仅是闲鱼风控系统识别出可疑行为弹了图形验证（如"找两个松鼠"），

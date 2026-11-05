@@ -207,20 +207,13 @@ class XianyuAsync:
 
             async with async_session_maker() as session:
                 stmt = (
-                    select(
-                        YtxAccount.status,
-                        YtxAccount.proxy_type,
-                        YtxAccount.proxy_host,
-                        YtxAccount.proxy_port,
-                        YtxAccount.proxy_user,
-                        YtxAccount.proxy_pass,
-                    )
+                    select(YtxAccount)
                     .where(YtxAccount.account_id == self.cookie_id)
                     .order_by(YtxAccount.id.desc())
                     .limit(2)
                 )
                 result = await session.execute(stmt)
-                rows = result.all()
+                rows = result.scalars().all()
                 if not rows:
                     logger.warning(f"【{self.cookie_id}】未找到账号运行配置")
                     return None

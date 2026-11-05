@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import faulthandler
 import sys
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from loguru import logger
 
 from app.core.config import get_settings
 from common.db.redis_client import close_redis_client, initialize_redis_client
+from common.security.runtime import after_activation, ActivationMiddleware
 from common.utils.logging_utils import setup_logging
 from common.utils.network_utils import resolve_listen_host
 
@@ -35,7 +37,7 @@ settings = get_settings()
 
 # 配置日志（控制台 + 文件 + 第三方库拦截）
 setup_logging(
-    log_file=Path(__file__).parent / "logs" / "scheduler.log",
+    log_file=Path(os.environ.get("YTX_LOG_DIR", str(Path(__file__).parent / "logs"))) / "scheduler.log",
     log_level=settings.log_level,
     third_party_loggers=["uvicorn", "uvicorn.error", "uvicorn.access", "fastapi", "apscheduler"],
 )
@@ -65,6 +67,14 @@ async def check_database_connection():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from common.security.runtime import runtime_owner
+    async with runtime_owner("scheduler"):
+        async with _service_lifespan(app):
+            yield
+
+
+@asynccontextmanager
+async def _service_lifespan(app: FastAPI):
     """应用生命周期管理"""
     logger.info(f"{settings.project_name} 启动中...")
     logger.info(f"服务端口: {settings.service_port}")
@@ -98,11 +108,14 @@ async def lifespan(app: FastAPI):
     # 启动定时任务
     from app.services.scheduler_service import get_scheduler_service
     scheduler = get_scheduler_service()
-    scheduler.start()
+    activation_task = asyncio.create_task(after_activation(scheduler.start)) if __import__("os").environ.get("AUTO_START_SCHEDULER", "true").lower() == "true" else None
     logger.info("定时任务管理器已启动")
     
     yield
     
+    if activation_task is not None:
+        activation_task.cancel()
+        await asyncio.gather(activation_task, return_exceptions=True)
     # 停止定时任务
     scheduler.stop()
     logger.info("定时任务管理器已停止")
@@ -137,6 +150,7 @@ app = FastAPI(
     title=settings.project_name,
     lifespan=lifespan,
 )
+app.add_middleware(ActivationMiddleware)
 
 
 # 全局异常处理器

@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Index, String, Text
+from sqlalchemy import BigInteger, DateTime, Index, String, Text, event, inspect
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.db.base_class import Base, TimestampMixin
+from common.security.vault import decrypt, encrypt_token, is_encrypted, token_context
 
 
 class TokenCache(TimestampMixin, Base):
@@ -26,7 +28,24 @@ class TokenCache(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True, comment="主键ID")
     user_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, comment="用户ID（myid）")
-    token: Mapped[str] = mapped_column(Text, nullable=False, comment="IM Token")
+    _token: Mapped[str] = mapped_column("token", Text, nullable=False, comment="加密IM Token")
+
+    @hybrid_property
+    def token(self):
+        if not self._token:
+            return self._token
+        state = inspect(self)
+        if not is_encrypted(self._token) and (state.transient or state.pending or state.attrs._token.history.has_changes()):
+            return self._token
+        return decrypt(self._token, token_context(self.user_id))
+
+    @token.setter
+    def token(self, value):
+        self._token = value
+
+    @token.expression
+    def token(cls):
+        return cls._token
     device_id: Mapped[str] = mapped_column(String(128), nullable=False, comment="设备ID")
     expire_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, comment="过期时间")
     renew_expire_at: Mapped[datetime | None] = mapped_column(
@@ -34,3 +53,7 @@ class TokenCache(TimestampMixin, Base):
         nullable=True,
         comment="续期Token过期时间",
     )
+
+
+event.listen(TokenCache, "before_insert", encrypt_token)
+event.listen(TokenCache, "before_update", encrypt_token)

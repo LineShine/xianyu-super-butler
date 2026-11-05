@@ -62,6 +62,7 @@ def read_config(root: Path, *, native=True) -> dict:
         env["CORS_ORIGINS"] = settings.get("CORS_ORIGINS", f"http://127.0.0.1:{frontend_port},http://localhost:{frontend_port}")
         env["FRONTEND_PUBLIC_URL"] = settings.get("FRONTEND_PUBLIC_URL", "http://127.0.0.1:" + result["services"]["frontend"]["ports"][0]["published"])
         env["BACKEND_WEB_PUBLIC_URL"] = settings.get("BACKEND_WEB_PUBLIC_URL", "http://127.0.0.1:" + result["services"]["backend-web"]["ports"][0]["published"])
+        env["AUTO_START_SCHEDULER"] = settings.get("AUTO_START_SCHEDULER", "true")
         env["AUTO_START_WEBSOCKET"] = settings.get("AUTO_START_WEBSOCKET", "true")
         env["AUTO_START_CRAWL_JOBS"] = settings.get("AUTO_START_CRAWL_JOBS", "true")
     return result

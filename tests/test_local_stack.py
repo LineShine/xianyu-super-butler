@@ -22,7 +22,7 @@ class LocalStackTests(unittest.TestCase):
         with patch('subprocess.run',side_effect=AssertionError('No container inspection')):
             config=read_config(self.root)
         self.assertEqual(config['services']['backend-web']['environment']['MYSQL_PASSWORD'],'a$#${literal} secret')
-        self.assertEqual(self.stack.ports(config),{'mysql':24306,'redis':27379,'backend-web':8189,'websocket':8190,'scheduler':8191,'frontend':9999})
+        self.assertEqual(self.stack.ports(config),{'backend-web':8189,'websocket':8190,'scheduler':8191,'frontend':9999})
         with (self.root/'.env').open('a') as out:out.write("FRONTEND_PORT=10009\n")
         config=read_config(self.root)
         self.assertEqual(self.stack.ports(config)['frontend'],10009)

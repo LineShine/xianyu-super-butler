@@ -18,6 +18,7 @@ from sqlalchemy.dialects.mysql import insert
 
 from common.db.session import async_session_maker
 from common.models.token_cache import TokenCache
+from common.security.vault import encrypt, token_context
 from common.utils.time_utils import get_beijing_now_naive, random_token_cache_expiry
 
 
@@ -102,17 +103,12 @@ async def get_reusable_token_cache(
             async with async_session_maker() as session:
                 row = (
                     await session.execute(
-                        select(
-                            TokenCache.token,
-                            TokenCache.device_id,
-                            TokenCache.expire_at,
-                            TokenCache.renew_expire_at,
-                        ).where(
+                        select(TokenCache).where(
                             TokenCache.id == cache_id,
                             TokenCache.user_id == token_user_id,
                         )
                     )
-                ).one_or_none()
+                ).scalar_one_or_none()
             break
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
@@ -186,7 +182,11 @@ async def mark_token_cache_expired(
             async with async_session_maker() as session:
                 conditions = [TokenCache.user_id == clean_user_id]
                 if clean_expected_token:
-                    conditions.append(TokenCache.token == clean_expected_token)
+                    cached = (await session.execute(select(TokenCache).where(
+                        TokenCache.user_id == clean_user_id).with_for_update())).scalar_one_or_none()
+                    if cached is None or cached.token != clean_expected_token:
+                        return TokenCacheInvalidationResult(True, changed=False, message="Token已更新或不存在")
+                    conditions.append(TokenCache.id == cached.id)
                 elif not invalidate_valid_cache:
                     conditions.append(TokenCache.expire_at <= checked_at)
                 if clean_expected_device_id:
@@ -309,7 +309,7 @@ async def upsert_token_cache(
             async with async_session_maker() as session:
                 statement = insert(TokenCache).values(
                     user_id=clean_user_id,
-                    token=clean_token,
+                    token=encrypt(clean_token, token_context(clean_user_id)),
                     device_id=clean_device_id,
                     expire_at=expire_at,
                 )
@@ -373,7 +373,7 @@ async def write_renewed_token_cache(
     # 乐观并发保护由 id + user_id + 到期日条件保证；不再用 device_id 作为匹配条件，
     # 否则远程接口返回新 Device ID 时会匹配不到缓存行导致续期静默失败。
     # 新 Device ID（非空）随 Token 一并写回，保证 Token 与 Device ID 始终成对。
-    update_values: dict[str, object] = {"token": token, "renew_expire_at": renew_expire_at}
+    update_values: dict[str, object] = {"token": encrypt(token, token_context(token_user_id)), "renew_expire_at": renew_expire_at}
     clean_device_id = str(device_id or "").strip()
     if clean_device_id:
         update_values["device_id"] = clean_device_id

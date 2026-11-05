@@ -34,9 +34,8 @@ class BaseConfig(BaseSettings):
     environment: str = Field(default="development")
     log_level: str = Field(default="INFO")
 
-    # SQL 日志开关：开启后会在每条 SQL 执行前打印拼接好参数的完整 SQL。
-    # 默认开启，便于开发与 Docker 环境排查；高并发生产环境如需降低开销可设为 false。
-    sql_echo: bool = Field(default=True)
+    # SQL 日志默认关闭；开启时只记录 SQL 模板，不输出绑定参数。
+    sql_echo: bool = Field(default=False)
 
     # 数据库配置
     mysql_host: str = Field(default="localhost")

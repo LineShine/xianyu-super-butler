@@ -253,7 +253,7 @@ class CookiesRefreshTaskService:
                 next_expire_at=schedule.expire_at,
             )
 
-        old_cookie_snapshot = get_cookie_refresh_snapshot(account.metadata_json)
+        old_cookie_snapshot = get_cookie_refresh_snapshot(account.metadata_json, account=account)
         normalized_cookie_string = normalize_cookie_string(account.cookie or "")
         if not normalized_cookie_string and not old_cookie_snapshot:
             schedule.last_status = "failed"

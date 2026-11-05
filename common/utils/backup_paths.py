@@ -106,7 +106,12 @@ def locate_backup_file(file_name: str | None, file_path: str | None) -> Path | N
     # 2. 回退到记录中保存的绝对路径（同机/同共享卷下依然有效）
     if file_path:
         candidate = Path(file_path)
-        if candidate.is_file():
+        try:
+            candidate = candidate.resolve()
+            candidate.relative_to(get_backup_root().resolve())
+        except (OSError, ValueError):
+            return None
+        if candidate.is_file() and candidate.name == file_name:
             return candidate
 
     return None

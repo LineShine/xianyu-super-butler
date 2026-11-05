@@ -195,6 +195,10 @@ def check_native(config):
     if not path.is_file():
         raise RuntimeError('本机基础服务尚未初始化，请执行 bash dev.sh start。')
     metadata = json.loads(path.read_text())
+    env = credentials(config)
+    identity_hash = hashlib.sha256(json.dumps({key: env[key] for key in ('MYSQL_DATABASE', 'MYSQL_USER', 'MYSQL_PASSWORD')}, sort_keys=True).encode()).hexdigest()
+    if metadata.get('identity_hash') != identity_hash:
+        raise RuntimeError('数据库配置与当前本机实例不一致，禁止连接错误库或空库。')
     if metadata.get('status') != 'ready':
         raise RuntimeError('本机数据准备尚未完成，不能启动应用。')
     with mysql_connection(config) as connection:

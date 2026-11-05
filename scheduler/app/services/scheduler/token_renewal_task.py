@@ -190,7 +190,7 @@ class TokenRenewalTask:
                         TokenCache.device_id,
                         YtxAccount.id.label("account_row_id"),
                         YtxAccount.account_id,
-                        YtxAccount.cookie.label("cookies_str"),
+                        YtxAccount,
                     )
                     .join(YtxAccount, YtxAccount.unb == TokenCache.user_id)
                     .where(
@@ -209,7 +209,8 @@ class TokenRenewalTask:
         # 历史数据可能存在多个账号行使用同一 unb；每个缓存键一轮只请求一次。
         candidates_by_user: dict[str, TokenRenewalCandidate] = {}
         for row in rows:
-            if not row.user_id or not row.device_id or not row.cookies_str:
+            cookies_str = row.YtxAccount.cookie
+            if not row.user_id or not row.device_id or not cookies_str:
                 logger.warning(
                     f"【{self.task_name}】跳过缺少必要数据的账号: "
                     f"account_id={row.account_id}, user_id={row.user_id or '空'}"
@@ -222,7 +223,7 @@ class TokenRenewalTask:
                     account_row_id=row.account_row_id,
                     user_id=row.user_id,
                     account_id=row.account_id,
-                    cookies_str=row.cookies_str,
+                    cookies_str=cookies_str,
                     device_id=row.device_id,
                 ),
             )

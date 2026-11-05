@@ -172,7 +172,9 @@ class LocalStack:
         return result.returncode == 0 and str(self.root / "scripts/local_stack.py") in result.stdout and f"_serve {token}" in result.stdout
 
     def ports(self, config):
-        targets = {"mysql": 3306, "redis": 6379, **local_dev.SERVICES, "frontend": 80}
+        targets = {**local_dev.SERVICES, "frontend": 80}
+        if type(self).__name__ == "InfrastructureStack":
+            targets = {"mysql": 3306, "redis": 6379}
         return {name: int(local_dev.published_port(config["services"][name], target)) for name, target in targets.items() if name in config["services"]}
 
     def preflight_ports(self, config, previous):
@@ -188,7 +190,7 @@ class LocalStack:
                 except OSError:
                     raise RuntimeError(f"端口 {port} 被其他程序占用，请关闭该程序后重试。")
 
-    def start(self, *, open_browser=True):
+    def start(self, *, open_browser=True, prepared=False):
         state = read_json(self.state_path)
         if self.owned_supervisor(state):
             if state.get("phase") == "running":
@@ -201,7 +203,8 @@ class LocalStack:
         migration = read_json(self.runtime / "data-migration.json")
         if migration and migration.get("phase") not in ("complete", "activated"):
             raise RuntimeError("数据迁移尚未通过校验，请重新运行 migrate 续跑；应用和自动任务未启动。")
-        self.prepare()  # A dependency failure must never interrupt the old deployment.
+        if not prepared:
+            self.prepare()  # Prepare before changing a running deployment.
         config = local_dev.read_config(self.root)
         previous = {}
         self.preflight_ports(config, previous)
@@ -213,7 +216,7 @@ class LocalStack:
             write_json(self.state_path, state)
             with self.log_file("supervisor") as output:
                 process = subprocess.Popen([sys.executable, str(self.root / "scripts/local_stack.py"), "_serve", state["token"]], cwd=self.root, stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True)
-            print("正在启动本机 MySQL、Redis 和四个应用服务，请稍候……", flush=True)
+            print("正在启动四个应用服务（保留本机 MySQL、Redis），请稍候……", flush=True)
             deadline = time.monotonic() + 900
             while time.monotonic() < deadline:
                 current = read_json(self.state_path)
@@ -276,21 +279,18 @@ class LocalStack:
 
     def cleanup_children(self):
         for name, process in reversed(self.children):
+            if process.poll() is not None:
+                continue
             try:
                 os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
             try:
-                process.wait(timeout=90 if name in ("mysql", "redis") else 20)
+                process.wait(timeout=120)
             except subprocess.TimeoutExpired:
-                if name in ("mysql", "redis"):
-                    raise RuntimeError(f"{name} 仍在保存数据，未强制结束，请查看对应日志。")
-            # The main process may have exited before its browser/helper children.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=5)
+                raise RuntimeError(f"{name} 仍在退出，未强制结束；已阻止运行模式切换。")
+            # Do not signal a reaped process group: macOS may already have reused
+            # its ID. Browser resources are closed by each service's lifespan.
 
     def serve(self, token):
         state = read_json(self.state_path)
@@ -304,7 +304,8 @@ class LocalStack:
         try:
             config = local_dev.read_config(self.root)
             ports = self.ports(config)
-            self.start_databases(config)
+            from native_infra import check_native
+            check_native(config)
             state["children"] = {name: process.pid for name, process in self.children}
             write_json(self.state_path, state)
             env = os.environ.copy()
@@ -370,13 +371,13 @@ class LocalStack:
             print("没有本入口管理的运行进程；未停止其他程序。", flush=True)
             return
         os.kill(state["pid"], signal.SIGTERM)
-        deadline = time.monotonic() + 180
+        deadline = time.monotonic() + 600
         while time.monotonic() < deadline:
             current = read_json(self.state_path)
             if current.get("phase") in ("stopped", "failed") and current.get("token") == state["token"]:
                 if current.get("children"):
                     raise RuntimeError(current.get("error") or "部分进程仍在退出，请查看日志。")
-                print("本机应用、MySQL 和 Redis 已停止；数据已保留。", flush=True)
+                print("当前管理器的服务已停止；数据已保留。", flush=True)
                 return
             if not self.owned_supervisor(state):
                 raise RuntimeError("管理进程已经退出，请查看日志并确认服务端口已释放。")
@@ -387,9 +388,9 @@ class LocalStack:
         state = read_json(self.state_path)
         live = self.owned_supervisor(state)
         labels = {"starting": "启动中", "running": "运行中", "stopping": "停止中", "stopped": "已停止", "failed": "启动或运行失败"}
-        print("方式五：" + (labels.get(state.get("phase"), "未启动") if live else "未运行"))
+        print(("基础服务：" if type(self).__name__ == "InfrastructureStack" else "原生应用：") + (labels.get(state.get("phase"), "未启动") if live else "未运行"))
         if live and state.get("phase") == "running":
-            print(state["url"])
+            print(state.get("url", "MySQL / Redis"))
         if state.get("error"):
             print(state["error"])
         print(f"日志目录：{self.logs}")
@@ -397,32 +398,47 @@ class LocalStack:
 
 def main():
     parser = argparse.ArgumentParser(description="方式五统一启动：自动准备本机 MySQL、Redis 和应用，无需 Docker")
-    parser.add_argument("command", nargs="?", default="start", choices=("start", "stop", "restart", "status", "setup", "logs", "migrate", "_serve"))
+    parser.add_argument("command", nargs="?", default="start", choices=("start", "stop", "restart", "status", "setup", "logs", "migrate", "switch", "build", "update", "_infra", "_serve"))
     parser.add_argument("target", nargs="?", help="logs 的服务名，或内部启动标识")
+    parser.add_argument("--restart", action="store_true", help="即使目标模式已运行也重启应用")
     parser.add_argument("--no-open", action="store_true", help="启动成功后不自动打开浏览器")
     parser.add_argument("--from", dest="source", help="原项目目录（仅 migrate 使用）")
     parser.add_argument("--dry-run", action="store_true", help="只检查迁移清单，不停服务、不改数据")
     args = parser.parse_args()
     stack = LocalStack()
     try:
-        if args.command == "_serve":
+        if args.command == "_infra":
+            from deployment import InfrastructureStack
+            InfrastructureStack().serve(args.target)
+        elif args.command == "_serve":
             stack.serve(args.target)
         elif args.command == "status":
-            stack.status()
+            from deployment import Deployment
+            Deployment(stack).status()
         elif args.command == "logs":
             target = args.target or "supervisor"
             if target not in (*APPS, "mysql", "redis", "migration", "setup", "supervisor"):
                 raise RuntimeError("日志名称可选 backend-web、websocket、scheduler、frontend、mysql、redis、migration、setup、supervisor。")
+            if read_json(stack.runtime / "application.json").get("mode") == "docker" and target in APPS:
+                from docker_deploy import DockerDeployment
+                docker = DockerDeployment(stack)
+                docker.daemon()
+                return subprocess.run(["docker", "compose", "-f", str(docker.path), "logs", "--tail", "100", "-f", target]).returncode
             path = stack.logs / f"{target}.log"
             if not path.exists():
                 raise RuntimeError("尚无该服务日志。")
             subprocess.run(["tail", "-n", "100", "-f", str(path)])
         else:
             with stack.lock():
-                if args.command in ("stop", "restart"):
-                    stack.stop()
-                if args.command in ("start", "restart"):
-                    stack.start(open_browser=not args.no_open)
+                from deployment import Deployment, instance_file
+                deployment = Deployment(stack)
+                if args.command == "stop":
+                    deployment.stop()
+                elif args.command in ("switch", "start", "restart", "update"):
+                    target = args.target if args.command == "switch" else read_json(instance_file(stack.root)).get("application_mode", "native")
+                    deployment.switch(target, restart=args.restart or args.command in ("restart", "update"), open_browser=not args.no_open)
+                elif args.command == "build":
+                    deployment.docker().prepare_build()
                 elif args.command == "migrate":
                     if not args.source:
                         raise RuntimeError("请通过 --from 指定原项目目录。")

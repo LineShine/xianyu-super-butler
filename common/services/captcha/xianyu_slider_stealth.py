@@ -4,6 +4,7 @@
 在 PlaywrightSliderService 基础上扩展，添加密码登录功能
 """
 from __future__ import annotations
+from common.security.private_captures import capture_root, capture_url, safe_subject
 
 import os
 import time
@@ -206,6 +207,15 @@ class XianyuSliderStealth(PlaywrightSliderService):
                 logger.error(f"【{self.pure_user_id}】✗ 未找到账号输入框")
                 return None
             
+            # Credentials may only be entered into the verified first-party HTTPS frame.
+            from urllib.parse import urlsplit
+            origin = urlsplit(login_frame.url)
+            trusted = ("goofish.com", "taobao.com", "alibaba.com")
+            if origin.scheme != "https" or not any(origin.hostname == host or (origin.hostname or "").endswith("." + host) for host in trusted):
+                raise RuntimeError("登录页面来源不可信，已停止输入密码")
+            from common.security.redaction import register_secret
+            register_secret(password)
+
             # 输入密码
             logger.info(f"【{self.pure_user_id}】输入密码...")
             password_input = login_frame.query_selector('#fm-login-password')
@@ -818,10 +828,10 @@ class XianyuSliderStealth(PlaywrightSliderService):
                                             _static_base = pathlib.Path(_static_env)
                                         else:
                                             _static_base = pathlib.Path(__file__).resolve().parent.parent.parent.parent / 'backend-web' / 'static'
-                                        screenshots_dir = str(_static_base / 'uploads' / 'face')
+                                        screenshots_dir = str(capture_root())
                                         os.makedirs(screenshots_dir, exist_ok=True)
                                         
-                                        old_screenshots = glob.glob(os.path.join(screenshots_dir, f"face_verify_{self.pure_user_id}_*.jpg"))
+                                        old_screenshots = glob.glob(os.path.join(screenshots_dir, f"face_verify_{safe_subject(self.pure_user_id)}_*.jpg"))
                                         for old_file in old_screenshots:
                                             try:
                                                 os.remove(old_file)
@@ -848,14 +858,14 @@ class XianyuSliderStealth(PlaywrightSliderService):
                                         if screenshot_bytes:
                                             # 生成带时间戳的文件名并直接保存
                                             timestamp = get_beijing_now_naive().strftime('%Y%m%d_%H%M%S')
-                                            filename = f"face_verify_{self.pure_user_id}_{timestamp}.jpg"
+                                            filename = f"face_verify_{safe_subject(self.pure_user_id)}_{timestamp}.jpg"
                                             file_path = os.path.join(screenshots_dir, filename)
                                             
                                             try:
                                                 with open(file_path, 'wb') as f:
                                                     f.write(screenshot_bytes)
                                                 # 返回相对URL路径，供前端访问
-                                                screenshot_path = f"/static/uploads/face/{filename}"
+                                                screenshot_path = capture_url(filename)
                                                 logger.info(f"【{self.pure_user_id}】✅ 人脸验证截图已保存: {file_path}, URL: {screenshot_path}")
                                             except Exception as e:
                                                 logger.error(f"【{self.pure_user_id}】保存截图失败: {e}")
@@ -1085,11 +1095,11 @@ class XianyuSliderStealth(PlaywrightSliderService):
                 _static_base = pathlib.Path(_static_env)
             else:
                 _static_base = pathlib.Path(__file__).resolve().parent.parent.parent.parent / 'backend-web' / 'static'
-            screenshots_dir = str(_static_base / 'uploads' / 'face')
+            screenshots_dir = str(capture_root())
             os.makedirs(screenshots_dir, exist_ok=True)
             logger.info(f"【{self.pure_user_id}】截图保存目录: {screenshots_dir}")
             
-            old_screenshots = glob.glob(os.path.join(screenshots_dir, f"face_verify_{self.pure_user_id}_*.jpg"))
+            old_screenshots = glob.glob(os.path.join(screenshots_dir, f"face_verify_{safe_subject(self.pure_user_id)}_*.jpg"))
             for old_file in old_screenshots:
                 try:
                     os.remove(old_file)
@@ -1119,14 +1129,14 @@ class XianyuSliderStealth(PlaywrightSliderService):
             if screenshot_bytes:
                 # 生成带时间戳的文件名并直接保存
                 timestamp = get_beijing_now_naive().strftime('%Y%m%d_%H%M%S')
-                filename = f"face_verify_{self.pure_user_id}_{timestamp}.jpg"
+                filename = f"face_verify_{safe_subject(self.pure_user_id)}_{timestamp}.jpg"
                 file_path = os.path.join(screenshots_dir, filename)
                 
                 try:
                     with open(file_path, 'wb') as f:
                         f.write(screenshot_bytes)
                     # 返回相对URL路径，供前端访问
-                    screenshot_path = f"/static/uploads/face/{filename}"
+                    screenshot_path = capture_url(filename)
                     logger.info(f"【{self.pure_user_id}】✅ 人脸验证截图已保存: {file_path}, URL: {screenshot_path}")
                     return screenshot_path
                 except Exception as e:

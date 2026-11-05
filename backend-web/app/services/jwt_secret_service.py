@@ -86,8 +86,6 @@ async def ensure_jwt_secret_key(settings) -> None:
                 "数据库中未找到 JWT 密钥，已自动生成强随机密钥并持久化；"
                 "如有已登录用户，需重新登录一次（仅此一次）"
             )
-    except Exception as e:
-        # 数据库不可用等异常不应阻断启动；此时退回使用配置默认值，仅告警
-        logger.opt(exception=e).error(
-            "初始化 JWT 密钥失败（数据库不可用？），本次启动将使用配置默认值；恢复数据库后重启即可统一托管"
-        )
+    except Exception:
+        logger.error("JWT 密钥初始化失败，禁止使用默认密钥启动")
+        raise RuntimeError("JWT 密钥不可用，启动已停止") from None

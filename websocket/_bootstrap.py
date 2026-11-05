@@ -16,10 +16,13 @@ from __future__ import annotations
 import asyncio
 import faulthandler
 import sys
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
@@ -29,6 +32,7 @@ from common.services.captcha.slider_mode import refresh_slider_mode_from_databas
 from common.services.risk_control_log_cleanup_service import (
     fail_processing_risk_control_logs_on_restart,
 )
+from common.security.runtime import after_activation, ActivationMiddleware
 from common.utils.logging_utils import setup_logging
 from common.utils.network_utils import resolve_listen_host
 
@@ -38,7 +42,7 @@ settings = get_settings()
 
 # 配置日志（控制台 + 文件 + 第三方库拦截）
 setup_logging(
-    log_file=Path(__file__).parent / "logs" / "websocket.log",
+    log_file=Path(os.environ.get("YTX_LOG_DIR", str(Path(__file__).parent / "logs"))) / "websocket.log",
     log_level=settings.log_level,
     third_party_loggers=["uvicorn", "uvicorn.error", "uvicorn.access", "fastapi", "websockets", "httpx", "httpcore"],
 )
@@ -68,6 +72,14 @@ async def check_database_connection():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from common.security.runtime import runtime_owner
+    async with runtime_owner("websocket"):
+        async with _service_lifespan(app):
+            yield
+
+
+@asynccontextmanager
+async def _service_lifespan(app: FastAPI):
     """应用生命周期管理"""
     logger.info(f"{settings.project_name} 启动中...")
     logger.info(f"服务端口: {settings.service_port}")
@@ -114,20 +126,16 @@ async def lifespan(app: FastAPI):
     cookie_manager = get_manager()
     logger.info("CookieManager已初始化")
     
-    # 启动CookieManager(加载启用的账号)，可通过配置禁用
-    if settings.auto_start_websocket:
-        try:
-            await cookie_manager.start()
-            logger.info("CookieManager已启动,账号任务已加载")
-        except Exception as e:
-            logger.error(f"CookieManager启动失败: {e}")
-    else:
-        logger.info("已禁用自动启动WebSocket连接（AUTO_START_WEBSOCKET=false）")
-    
+    activation_task = asyncio.create_task(after_activation(cookie_manager.start)) if settings.auto_start_websocket else None
+
     yield
     
     logger.info(f"{settings.project_name} 关闭中...")
     
+    if activation_task is not None:
+        activation_task.cancel()
+        await asyncio.gather(activation_task, return_exceptions=True)
+
     # 停止CookieManager
     try:
         await cookie_manager.stop()
@@ -158,6 +166,12 @@ app = FastAPI(
     title=settings.project_name,
     lifespan=lifespan,
 )
+app.add_middleware(ActivationMiddleware)
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={"success": False, "code": 422, "message": "请求参数不正确", "data": None})
+
 
 # 配置CORS
 app.add_middleware(

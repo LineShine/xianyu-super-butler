@@ -16,6 +16,7 @@ from sqlalchemy import select, update, delete, and_, text, func
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from common.db.session import async_session_maker
+from common.security.vault import CredentialUnavailable
 from common.core.config import get_settings
 from common.models.ytx_account import YtxAccount
 from common.models.risk_control_log import YtxRiskControlLog
@@ -42,6 +43,7 @@ def _get_thread_local_session_maker():
         engine = create_async_engine(
             settings.async_database_url,
             echo=False,
+            hide_parameters=True,
             pool_pre_ping=settings.db_pool_pre_ping,  # 取连接前 ping，剔除失效连接（asyncmy ping 已在 session 层做兼容修补）
             pool_size=1,   # 兼容层线程为一次性，单协程只需 1 条连接（原 3，避免连接累积）
             max_overflow=2,  # 仅留少量溢出余量（原 5），降低单引擎最大连接数 8 -> 3
@@ -130,6 +132,8 @@ class DBManagerCompat:
                 return None
 
             if exception[0]:
+                if isinstance(exception[0], CredentialUnavailable):
+                    raise exception[0]
                 if attempt < max_attempts:
                     logger.warning(f"执行异步操作失败，第{attempt}次重试前等待 {attempt} 秒: {exception[0]}")
                     time.sleep(attempt)
@@ -197,15 +201,9 @@ class DBManagerCompat:
         """获取代理配置"""
         async def _query(session_maker):
             async with session_maker() as session:
-                stmt = select(
-                    YtxAccount.proxy_type,
-                    YtxAccount.proxy_host,
-                    YtxAccount.proxy_port,
-                    YtxAccount.proxy_user,
-                    YtxAccount.proxy_pass
-                ).where(YtxAccount.account_id == cookie_id)
+                stmt = select(YtxAccount).where(YtxAccount.account_id == cookie_id)
                 result = await session.execute(stmt)
-                row = result.first()
+                row = result.scalars().first()
                 if not row:
                     return {'proxy_type': 'none', 'proxy_host': '', 'proxy_port': 0, 'proxy_user': '', 'proxy_pass': ''}
                 return {

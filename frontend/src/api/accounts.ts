@@ -86,7 +86,9 @@ export const getAccountDetailsPaginated = async (
     message_expire_time?: number
     reply_delay_seconds?: number
     username?: string
-    login_password?: string
+    has_password?: boolean
+    has_cookie?: boolean
+    credential_status?: string
     show_browser?: boolean
     disable_reason?: string
     filter_count?: number
@@ -168,7 +170,9 @@ export const getAccountDetailsPaginated = async (
       message_expire_time: item.message_expire_time,
       reply_delay_seconds: item.reply_delay_seconds,
       username: item.username,
-      login_password: item.login_password,
+      has_password: item.has_password,
+      has_cookie: item.has_cookie,
+      credential_status: item.credential_status,
       show_browser: item.show_browser,
       disable_reason: item.disable_reason,
       filter_count: item.filter_count || 0,
@@ -196,8 +200,8 @@ export const addAccount = (data: { id: string; cookie: string }): Promise<ApiRes
 }
 
 // 更新账号 Cookie 值
-export const updateAccountCookie = (id: string, value: string): Promise<ApiResponse> => {
-  return put(`${COOKIE_PREFIX}/${id}`, { id, value })
+export const updateAccountCookie = (id: string, value: string, cookie_action: "replace" | "clear" = "replace"): Promise<ApiResponse> => {
+  return put(`${COOKIE_PREFIX}/${id}`, { id, value, cookie_action })
 }
 
 // 更新账号启用/禁用状态
@@ -345,7 +349,7 @@ export const getAvailableDeliveryBlockRules = (): Promise<ApiResponse> => {
 // 更新账号登录信息（用户名、密码、是否显示浏览器）
 export const updateAccountLoginInfo = (
   id: string,
-  data: { username?: string; login_password?: string; show_browser?: boolean }
+  data: { username?: string; login_password?: string; password_action?: "preserve" | "replace" | "clear"; show_browser?: boolean }
 ): Promise<ApiResponse> => {
   return put(`${COOKIE_PREFIX}/${id}/login-info`, data)
 }
@@ -565,6 +569,8 @@ export interface ProxyConfig {
   proxy_port?: number
   proxy_user?: string
   proxy_pass?: string
+  has_proxy_password?: boolean
+  password_action?: "preserve" | "replace" | "clear"
 }
 
 export interface ProxyConfigResponse {

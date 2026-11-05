@@ -219,17 +219,17 @@ class AccountExportService:
 
     def _write_account_basic(self, wb: Workbook, accounts: list[YtxAccount]) -> None:
         headers = [
-            "账号ID", "备注", "用户名", "登录密码", "Cookie", "状态", "禁用原因",
+            "账号ID", "备注", "用户名", "状态", "禁用原因",
             "暂停时长(秒)", "相同消息等待时间(秒)", "显示浏览器",
-            "代理类型", "代理地址", "代理端口", "代理用户名", "代理密码",
+            "代理类型", "代理地址", "代理端口", "代理用户名",
         ]
         rows = []
         for acc in accounts:
             rows.append([
-                acc.account_id, acc.remark, acc.username, acc.login_password,
-                acc.cookie, acc.status, acc.disable_reason,
+                acc.account_id, acc.remark, acc.username,
+                acc.status, acc.disable_reason,
                 acc.pause_duration, acc.message_expire_time, acc.show_browser,
-                acc.proxy_type, acc.proxy_host, acc.proxy_port, acc.proxy_user, acc.proxy_pass,
+                acc.proxy_type, acc.proxy_host, acc.proxy_port, acc.proxy_user,
             ])
         _write_sheet(wb, "账号基本信息", headers, rows)
 

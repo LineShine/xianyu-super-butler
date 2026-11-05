@@ -12,6 +12,8 @@
 - 历史 auto、缺失值或非法值：按 browser 处理，不再读取环境变量决定登录方式
 """
 from __future__ import annotations
+from common.utils.internal_auth import build_internal_auth_headers
+from common.security.private_captures import refresh_capture_url
 
 import httpx
 from fastapi import APIRouter, Depends
@@ -118,6 +120,7 @@ async def _proxy_ws_login(request: PasswordLoginRequest, user_id: int) -> dict:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{settings.websocket_service_url}/password-login",
+                headers=build_internal_auth_headers(settings.internal_api_token),
                 json={
                     "account_id": request.account_id,
                     "account": request.account,
@@ -155,10 +158,13 @@ async def check_login_status(
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
-                f"{settings.websocket_service_url}/password-login/check/{session_id}"
+                f"{settings.websocket_service_url}/password-login/check/{session_id}",
+                headers=build_internal_auth_headers(settings.internal_api_token), params={"user_id": current_user.id}
             )
             if resp.status_code == 200:
-                return resp.json()
+                result = resp.json()
+                result["screenshot_path"] = refresh_capture_url(result.get("screenshot_path"))
+                return result
             return {"status": "error", "message": f"查询服务异常: {resp.status_code}"}
     except httpx.ConnectError:
         return {"status": "error", "message": "登录服务不可用，请稍后重试"}
@@ -180,7 +186,8 @@ async def cancel_login(
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.delete(
-                f"{settings.websocket_service_url}/password-login/cancel/{session_id}"
+                f"{settings.websocket_service_url}/password-login/cancel/{session_id}",
+                headers=build_internal_auth_headers(settings.internal_api_token), params={"user_id": current_user.id}
             )
             if resp.status_code == 200:
                 return resp.json()

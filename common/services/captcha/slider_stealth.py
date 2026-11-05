@@ -75,7 +75,6 @@ class PlaywrightSliderService:
         "--no-first-run",
         "--no-zygote",
         "--disable-gpu",
-        "--disable-web-security",
         "--disable-features=VizDisplayCompositor",
         "--start-maximized",
         "--disable-background-timer-throttling",
@@ -164,7 +163,10 @@ class PlaywrightSliderService:
         self._slider_profile_tempdir: Optional[tempfile.TemporaryDirectory] = None
 
         # 持久化用户数据目录（参照旧框架）
-        self.user_data_dir = os.path.join(os.getcwd(), 'browser_data', f'user_{self.pure_user_id}')
+        import hashlib
+        self.profile_key = hashlib.sha256(str(user_id).encode()).hexdigest()
+        self.browser_root = os.environ.get('YTX_BROWSER_ROOT', os.path.join(os.getcwd(), 'browser_data', sys.platform))
+        self.user_data_dir = os.path.join(self.browser_root, 'account_' + self.profile_key)
         os.makedirs(self.user_data_dir, exist_ok=True)
         logger.debug(f"【{self.pure_user_id}】使用用户数据目录: {self.user_data_dir}")
 
@@ -313,13 +315,13 @@ class PlaywrightSliderService:
 
             browser_features = get_random_browser_features()
 
-            if add_stealth_script and self._slider_profile_tempdir is None:
+            if self._slider_profile_tempdir is None:
                 slider_sessions_dir = os.path.join(
-                    os.getcwd(), 'browser_data', 'slider_sessions'
+                    self.browser_root, 'sessions'
                 )
                 os.makedirs(slider_sessions_dir, exist_ok=True)
                 self._slider_profile_tempdir = tempfile.TemporaryDirectory(
-                    prefix=f"{self.pure_user_id}_",
+                    prefix=f"{self.profile_key[:16]}_",
                     dir=slider_sessions_dir,
                 )
                 self.user_data_dir = self._slider_profile_tempdir.name
@@ -347,7 +349,7 @@ class PlaywrightSliderService:
                 'args': args,
                 'locale': 'zh-CN',
                 'accept_downloads': True,
-                'ignore_https_errors': True,
+                'ignore_https_errors': False,
                 'extra_http_headers': {
                     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
                 }

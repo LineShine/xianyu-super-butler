@@ -2762,7 +2762,7 @@ async def _standalone_password_login_guarded(account_id: str, trigger_reason: st
             # 登录成功，更新数据库中的Cookie
             new_cookies_str = '; '.join([f"{k}={v}" for k, v in result.items()])
             # 记录密码登录获取到的新cookies
-            logger.info(f"【{account_id}】[密码登录获取的新Cookies] {new_cookies_str}")
+            logger.info(f"【{account_id}】密码登录凭据已更新（内容不记录）")
             
             success = db_manager.update_cookie_account_info(
                 account_id,

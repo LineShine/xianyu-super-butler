@@ -12,10 +12,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, JSON, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, JSON, String, Text, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from common.db.base_class import Base, TimestampMixin
+from common.security.vault import secret_attribute, encrypt_account
 
 
 class YtxAccount(TimestampMixin, Base):
@@ -29,15 +30,18 @@ class YtxAccount(TimestampMixin, Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True, comment="账号ID")
-    owner_id: Mapped[int] = mapped_column(BigInteger, index=True, comment="所属用户ID")
+    owner_id: Mapped[int] = mapped_column(BigInteger, index=True, active_history=True, comment="所属用户ID")
     account_id: Mapped[str] = mapped_column(String(80), nullable=False, comment="账号标识")
     display_name: Mapped[str | None] = mapped_column(String(120), comment="显示名称")
     unb: Mapped[str | None] = mapped_column(String(64), index=True, comment="UNB标识")
-    cookie: Mapped[str] = mapped_column(Text, nullable=False, comment="Cookie信息")
+    credential_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    _cookie: Mapped[str] = mapped_column("cookie", Text, nullable=False, comment="加密Cookie")
+    cookie = secret_attribute("cookie")
     login_method: Mapped[str] = mapped_column(String(20), nullable=False, comment="登录方式")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", comment="账号状态")
     username: Mapped[str | None] = mapped_column(String(120), comment="登录用户名")
-    login_password: Mapped[str | None] = mapped_column(Text, comment="登录密码")
+    _login_password: Mapped[str | None] = mapped_column("login_password", Text, comment="加密登录密码")
+    login_password = secret_attribute("login_password")
     remark: Mapped[str | None] = mapped_column(String(255), comment="备注")
     pause_duration: Mapped[int] = mapped_column(Integer, default=10, comment="暂停时长(分钟)")
     auto_confirm: Mapped[bool] = mapped_column(Boolean, default=False, comment="自动确认发货")
@@ -51,7 +55,8 @@ class YtxAccount(TimestampMixin, Base):
     proxy_host: Mapped[str | None] = mapped_column(String(255), comment="代理主机")
     proxy_port: Mapped[int | None] = mapped_column(Integer, comment="代理端口")
     proxy_user: Mapped[str | None] = mapped_column(String(120), comment="代理用户名")
-    proxy_pass: Mapped[str | None] = mapped_column(String(255), comment="代理密码")
+    _proxy_pass: Mapped[str | None] = mapped_column("proxy_pass", Text, comment="加密代理密码")
+    proxy_pass = secret_attribute("proxy_pass")
 
     # 退款订单注销配置字段
     refund_cancel_enabled: Mapped[bool | None] = mapped_column(Boolean, default=False, comment="退款订单注销开关")
@@ -144,3 +149,7 @@ class YtxAccount(TimestampMixin, Base):
         viewonly=True,
     )
 
+
+
+event.listen(YtxAccount, "before_insert", encrypt_account)
+event.listen(YtxAccount, "before_update", encrypt_account)

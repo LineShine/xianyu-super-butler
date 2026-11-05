@@ -194,7 +194,10 @@ async def list_cookie_details(
             AccountDetail(
                 pk=account.id,  # 数据库主键
                 id=account.account_id,
-                value=account.cookie or "",
+                value="",
+                has_cookie=bool(account._cookie),
+                has_password=bool(account._login_password),
+                credential_status="ready",
                 enabled=_status_to_enabled(account.status),
                 auto_confirm=bool(account.auto_confirm),
                 scheduled_redelivery=bool(account.scheduled_redelivery),
@@ -217,7 +220,6 @@ async def list_cookie_details(
                 message_expire_time=account.message_expire_time if account.message_expire_time is not None else 3600,
                 reply_delay_seconds=account.reply_delay_seconds if account.reply_delay_seconds is not None else 0,
                 username=account.username or "",
-                login_password=account.login_password or "",
                 show_browser=bool(account.show_browser),
                 disable_reason=account.disable_reason or "",
                 filter_count=filter_counts.get(account.account_id, 0),
@@ -340,7 +342,10 @@ async def list_cookie_details_paginated(
         details.append({
             "pk": account.id,  # 数据库主键
             "id": account.account_id,
-            "value": account.cookie or "",
+            "value": "",
+            "has_cookie": bool(account._cookie),
+            "has_password": bool(account._login_password),
+            "credential_status": "ready",
             "enabled": _status_to_enabled(account.status),
             "online": account.account_id in online_ids,
             "message_sync_status": account_health.get(account.account_id, {}).get('message_sync_status'),
@@ -368,7 +373,6 @@ async def list_cookie_details_paginated(
             "message_expire_time": account.message_expire_time if account.message_expire_time is not None else 3600,
             "reply_delay_seconds": account.reply_delay_seconds if account.reply_delay_seconds is not None else 0,
             "username": account.username or "",
-            "login_password": account.login_password or "",
             "show_browser": bool(account.show_browser),
             "disable_reason": account.disable_reason or "",
             "filter_count": filter_counts.get(account.account_id, 0),
@@ -498,8 +502,18 @@ async def update_account_cookie(
     account_service: AccountService = Depends(deps.get_account_service),
 ) -> ApiResponse:
     account = await _get_account_or_404(current_user, account_id, account_service)
+    if payload.cookie_action == "preserve":
+        return ApiResponse(success=True, message="Cookie 已保留")
+    if payload.cookie_action == "clear":
+        from app.services.websocket_client import websocket_client
+        stopped = await websocket_client.stop_account(account_id)
+        if isinstance(stopped, dict) and not stopped.get("success", True):
+            return ApiResponse(success=False, message="账号尚未停止，Cookie 已保留，请稍后重试")
+        await account_service.update_cookie(account, "")
+        await account_service.update_status(account, False, "用户清除 Cookie")
+        return ApiResponse(success=True, message="Cookie 已清除，账号已停止")
     await account_service.update_cookie(account, payload.value)
-    
+
     # 更新Cookie并重启WebSocket任务（通过HTTP调用WebSocket服务）
     from app.services.websocket_client import websocket_client
     await websocket_client.restart_account(account_id)
@@ -754,7 +768,7 @@ async def update_account_login_info(
     await account_service.update_login_info(
         account,
         username=payload.username,
-        login_password=payload.login_password,
+        login_password=(payload.login_password if payload.password_action == "replace" else "" if payload.password_action == "clear" else None),
         show_browser=payload.show_browser,
     )
     return ApiResponse(success=True, message="登录信息已更新")

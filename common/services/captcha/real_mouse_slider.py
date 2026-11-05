@@ -88,7 +88,7 @@ _LEGACY_BUSINESS_CAPTURE_DISTANCE_PX = 258.0
 _MAX_BUSINESS_CAPTURE_OVERSHOOT_PX = 80.0
 # 真人鼠标模式专用固定目录：本地与远程请求共用，用于复用和精确识别 Chrome 进程。
 _REAL_MOUSE_BROWSER_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "browser_data", "real_mouse_shared")
+    os.path.join(os.environ.get("YTX_BROWSER_ROOT", os.path.join(os.getcwd(), "browser_data", sys.platform)), "real_mouse")
 )
 _REAL_MOUSE_BROWSER_LOCK = os.path.join(_REAL_MOUSE_BROWSER_DIR, "browser.lock")
 
@@ -455,7 +455,8 @@ class _RealMouseSolver:
         self.pw = None
         self.context = None
         self.page = None
-        self.browser_dir = _REAL_MOUSE_BROWSER_DIR
+        import hashlib
+        self.browser_dir = os.path.join(_REAL_MOUSE_BROWSER_DIR, hashlib.sha256(self.user_id.encode()).hexdigest())
         os.makedirs(self.browser_dir, exist_ok=True)
         self._browser_lock_file = None
         self._slide_code: Optional[int] = None
@@ -482,7 +483,7 @@ class _RealMouseSolver:
                 no_viewport=True,          # 不强制 viewport，保留真实窗口尺寸
                 locale="zh-CN",
                 timezone_id="Asia/Shanghai",
-                ignore_https_errors=True,
+                ignore_https_errors=False,
                 extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
                 timeout=30000,
             )
@@ -1162,10 +1163,11 @@ def _get_real_mouse_executor() -> ThreadPoolExecutor:
 def _get_shared_solver(user_id: str) -> _RealMouseSolver:
     """获取真人鼠标进程级共享浏览器实例。"""
     global _shared_solver
+    if _shared_solver is not None and _shared_solver.user_id != str(user_id):
+        _shared_solver.close()
+        _shared_solver = None
     if _shared_solver is None:
         _shared_solver = _RealMouseSolver(user_id)
-    else:
-        _shared_solver.update_user(user_id)
     return _shared_solver
 
 

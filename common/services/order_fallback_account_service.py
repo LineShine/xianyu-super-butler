@@ -304,8 +304,8 @@ class OrderFallbackAccountService:
         conditions = [YtxAccount.account_id.in_(account_ids)]
         if not is_admin:
             conditions.append(YtxAccount.owner_id == owner_id)
-        stmt = select(YtxAccount.account_id, YtxAccount.status, YtxAccount.cookie).where(*conditions)
-        rows = {row[0]: (row[1], row[2]) for row in (await self.session.execute(stmt)).all()}
+        stmt = select(YtxAccount).where(*conditions)
+        rows = {row.account_id: (row.status, bool(row._cookie)) for row in (await self.session.execute(stmt)).scalars().all()}
         result: List[Dict[str, Any]] = []
         for aid in account_ids:
             if aid not in rows:

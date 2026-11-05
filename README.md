@@ -4,7 +4,7 @@
 
 ## 启动
 
-macOS 双击 **启动鱼太咸.command**：未运行时直接启动，已运行时先安全停止全部本地服务，再重新启动，无需先点击停止脚本。启动完成后会打开 <http://127.0.0.1:9999>。只需停止时，双击 **停止鱼太咸.command**。
+macOS 双击 **启动鱼太咸.command**：未运行时直接启动，已运行时安全重启原生应用，保持本机数据库运行（首次升级管理器例外），无需先点击停止脚本。启动完成后会打开 <http://127.0.0.1:9999>。只需停止时，双击 **停止鱼太咸.command**。
 
 首次运行需要联网，脚本会准备 Homebrew、Python、Node.js、MySQL、Redis 和浏览器组件。支持 macOS 与 Homebrew Linux，不需要 Docker。Homebrew 安装可能要求输入电脑的系统密码；下载中断后重新运行即可。
 
@@ -14,6 +14,8 @@ macOS 双击 **启动鱼太咸.command**：未运行时直接启动，已运行�
 bash dev.sh start
 bash dev.sh status
 bash dev.sh restart
+bash dev.sh switch docker
+bash dev.sh switch native
 bash dev.sh stop
 bash dev.sh setup
 bash dev.sh logs websocket
@@ -22,6 +24,8 @@ bash dev.sh logs websocket
 `setup` 用于停止服务后安装或更新依赖；日常直接运行 `start`。日志名称还支持 `backend-web`、`scheduler`、`frontend`、`mysql`、`redis`、`supervisor`、`setup`、`migration`。按 Ctrl+C 退出日志查看，不会停止服务。
 
 迁移用户用原项目的账号密码重新登录。全新空库初始管理员为 `admin` / `admin123`，登录后在个人设置修改密码。
+
+Mac 原生与 Docker 应用共用当前本机 MySQL、Redis 和密钥。全新 Linux 使用 `bash docker.sh start` 完整容器模式。Windows 此次提供框架，见 [Windows AI 交接](launcher/windows/AI-HANDOFF.md)。
 
 ## 新安装的系统设置
 
@@ -45,7 +49,7 @@ bash dev.sh logs websocket
 
 ## 数据与端口
 
-运行文件全部保存在 `yutaixian_data/`；根目录 `.env` 保存本实例随机生成的连接密码。停止、重新启动、修改源码均保留这些数据。请同时备份这两个位置；不要将它们提交 Git。
+除独立加密密钥外，运行文件保存在 `yutaixian_data/`；根目录 `.env` 保存本实例随机生成的连接密码。停止、重新启动、修改源码均保留这些数据。请备份这两个位置，并单独保管实例密钥；不要将它们提交 Git。详见 [共享部署与加密说明](docs/SHARED-DEPLOYMENT.md)。
 
 | 服务 | 本机端口 | 配置项 |
 | --- | --- | --- |

@@ -580,6 +580,8 @@ class GoofishImClient:
 
                 if row:
                     token_val, device_id_val, expire_at = row
+                    from common.security.vault import decrypt, token_context
+                    token_val = decrypt(token_val, token_context(self._cache_user_id))
                     now = get_beijing_now_naive()
                     if expire_at and expire_at > now:
                         remaining = expire_at - now

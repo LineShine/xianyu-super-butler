@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from loguru import logger
+from common.security.redaction import redact_record
 
 # 默认日志保留天数
 DEFAULT_LOG_RETENTION_DAYS = 7
@@ -74,6 +75,8 @@ def _add_file_handlers(log_file: Path, retention_days: int) -> tuple[int, int]:
         retention=f"{retention_days} days",
         encoding="utf-8",
         enqueue=True,
+        diagnose=False,
+        backtrace=False,
     )
     error_handler_id = logger.add(
         log_file.parent / "error.log",
@@ -83,6 +86,8 @@ def _add_file_handlers(log_file: Path, retention_days: int) -> tuple[int, int]:
         retention=f"{retention_days} days",
         encoding="utf-8",
         enqueue=True,
+        diagnose=False,
+        backtrace=False,
     )
     return common_handler_id, error_handler_id
 
@@ -113,6 +118,7 @@ def setup_logging(
 
     # 移除默认的 stderr handler
     logger.remove()
+    logger.configure(patcher=redact_record)
 
     # 添加控制台输出
     logger.add(
@@ -120,6 +126,8 @@ def setup_logging(
         level=log_level.upper(),
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
         colorize=True,
+        diagnose=False,
+        backtrace=False,
     )
 
     # 普通日志记录 DEBUG 及以上级别；ERROR 及以上级别同时写入 error.log。

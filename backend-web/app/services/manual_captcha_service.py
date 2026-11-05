@@ -28,6 +28,7 @@ from app.services.official_token_observer import OfficialTokenObserver
 from common.db.session import async_session_maker
 from common.models.risk_control_log import YtxRiskControlLog
 from common.models.token_cache import TokenCache
+from common.security.vault import encrypt, token_context
 from common.models.ytx_account import YtxAccount
 from common.services.captcha.token_response import extract_token_captcha_url, is_token_expired_response
 from common.services.im_token_api import (
@@ -692,11 +693,12 @@ class ManualCaptchaManager:
             # Both the automation connection and online-chat cache must see the
             # verified token; otherwise re-enabling would reuse the stale token.
             for user_id in (account.account_id, f"chat_{account.account_id}"):
+                protected_token = encrypt(token, token_context(user_id))
                 statement = insert(TokenCache).values(
-                    user_id=user_id, token=token, device_id=session.device_id, expire_at=expire_at,
+                    user_id=user_id, token=protected_token, device_id=session.device_id, expire_at=expire_at,
                 )
                 await db.execute(statement.on_duplicate_key_update(
-                    token=token, device_id=session.device_id, expire_at=expire_at, renew_expire_at=None,
+                    token=protected_token, device_id=session.device_id, expire_at=expire_at, renew_expire_at=None,
                 ))
             log = await db.get(YtxRiskControlLog, session.log_id)
             if log:

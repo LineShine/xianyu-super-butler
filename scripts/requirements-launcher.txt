@@ -1,3 +1,4 @@
 python-dotenv==1.2.4
 PyMySQL[rsa]==1.2.3
 redis==6.2.0
+cryptography==50.0.2

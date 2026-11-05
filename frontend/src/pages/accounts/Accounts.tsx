@@ -222,9 +222,11 @@ export function Accounts() {
   const [editingAccount, setEditingAccount] = useState<AccountDetail | null>(null)
   const [editNote, setEditNote] = useState('')
   const [editCookie, setEditCookie] = useState('')
+  const [clearEditCookie, setClearEditCookie] = useState(false)
   const [, setEditAutoConfirm] = useState(false)
   const [editPauseDuration, setEditPauseDuration] = useState(0)
   const [editUsername, setEditUsername] = useState('')
+  const [clearEditPassword, setClearEditPassword] = useState(false)
   const [editPassword, setEditPassword] = useState('')
   const [editPasswordVisible, setEditPasswordVisible] = useState(false)
   const [editShowBrowser, setEditShowBrowser] = useState(false)
@@ -1132,11 +1134,13 @@ export function Accounts() {
   const openEditModal = (account: AccountDetail) => {
     setEditingAccount(account)
     setEditNote(account.note || '')
-    setEditCookie(account.cookie || '')
+    setEditCookie('')
+    setClearEditCookie(false)
     setEditAutoConfirm(account.auto_confirm || false)
     setEditPauseDuration(account.pause_duration || 0)
     setEditUsername(account.username || '')
-    setEditPassword(account.login_password || '')
+    setEditPassword('')
+    setClearEditPassword(false)
     setEditShowBrowser(account.show_browser || false)
     setActiveModal('edit')
   }
@@ -1156,7 +1160,9 @@ export function Accounts() {
       }
 
       // 更新 Cookie 值
-      if (editCookie.trim() && editCookie.trim() !== editingAccount.cookie) {
+      if (clearEditCookie) {
+        promises.push(updateAccountCookie(editingAccount.id, '', 'clear'))
+      } else if (editCookie.trim() && editCookie.trim() !== editingAccount.cookie) {
         promises.push(updateAccountCookie(editingAccount.id, editCookie.trim()))
       }
 
@@ -1168,13 +1174,14 @@ export function Accounts() {
       // 更新登录信息（用户名、密码、显示浏览器）
       const loginInfoChanged = 
         editUsername !== (editingAccount.username || '') ||
-        editPassword !== (editingAccount.login_password || '') ||
+        (editPassword !== '' || clearEditPassword) ||
         editShowBrowser !== (editingAccount.show_browser || false)
       
       if (loginInfoChanged) {
         promises.push(updateAccountLoginInfo(editingAccount.id, {
           username: editUsername,
-          login_password: editPassword,
+          login_password: editPassword || undefined,
+          password_action: clearEditPassword ? "clear" : editPassword ? "replace" : "preserve",
           show_browser: editShowBrowser,
         }))
       }
@@ -1701,7 +1708,7 @@ export function Accounts() {
         setProxyHost(result.data.proxy_host || '')
         setProxyPort(result.data.proxy_port || '')
         setProxyUser(result.data.proxy_user || '')
-        setProxyPass(result.data.proxy_pass || '')
+        setProxyPass('')
       }
     } catch {
       addToast({ type: 'error', message: '加载代理配置失败' })
@@ -1733,6 +1740,7 @@ export function Accounts() {
         proxy_port: proxyType !== 'none' ? Number(proxyPort) : undefined,
         proxy_user: proxyType !== 'none' && proxyUser.trim() ? proxyUser.trim() : undefined,
         proxy_pass: proxyType !== 'none' && proxyPass ? proxyPass : undefined,
+        password_action: proxyType === 'none' ? 'clear' : proxyPass ? 'replace' : 'preserve',
       }
       const result = await updateProxyConfig(proxySettingsAccount.id, config)
       if (result.success) {
@@ -2549,12 +2557,12 @@ export function Accounts() {
                     </td>
                     <td>
                       <span className={`inline-flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded ${
-                        (account.username && account.login_password)
+                        (account.username && account.has_password)
                           ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' 
                           : 'bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-400'
                       }`}>
                         <Key className="w-3.5 h-3.5" />
-                        {(account.username && account.login_password) ? '已配置' : '未配置'}
+                        {(account.username && account.has_password) ? '已配置' : '未配置'}
                       </span>
                     </td>
                     {/* 功能开关组：图标按钮点击切换，hover 查看说明 */}
@@ -3242,13 +3250,17 @@ export function Accounts() {
                   <label className="input-label">Cookie</label>
                   <textarea
                     value={editCookie}
-                    onChange={(e) => setEditCookie(e.target.value)}
+                    onChange={(e) => { setEditCookie(e.target.value); setClearEditCookie(false) }}
                     className="input-ios h-20 resize-none font-mono text-xs"
                     placeholder="更新Cookie值"
                   />
                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                    当前Cookie长度: {editCookie.length} 字符
+                    {editingAccount?.has_cookie ? "Cookie 已保存；留空保留原值，输入新值后替换。" : "输入新 Cookie。"}
                   </p>
+                  <label className="flex items-center gap-2 text-sm mt-2">
+                    <input type="checkbox" checked={clearEditCookie} onChange={(e) => { setClearEditCookie(e.target.checked); if (e.target.checked) setEditCookie('') }} />
+                    清除 Cookie 并停止账号
+                  </label>
                 </div>
 
                 {/* 暂停时间 */}
@@ -3294,13 +3306,17 @@ export function Accounts() {
                     </div>
                     <div className="input-group">
                       <label className="input-label">登录密码</label>
+                      <label className="flex items-center gap-2 text-sm mb-2">
+                        <input type="checkbox" checked={clearEditPassword} onChange={(e) => { setClearEditPassword(e.target.checked); if (e.target.checked) setEditPassword('') }} />
+                        清除已保存的密码
+                      </label>
                       <div className="relative">
                         <input
                           type={editPasswordVisible ? 'text' : 'password'}
                           value={editPassword}
-                          onChange={(e) => setEditPassword(e.target.value)}
+                          onChange={(e) => { setEditPassword(e.target.value); setClearEditPassword(false) }}
                           className="input-ios pr-10"
-                          placeholder="登录密码"
+                          placeholder={editingAccount?.has_password ? "已保存，留空保留原密码" : "输入新密码"}
                         />
                         <button
                           type="button"

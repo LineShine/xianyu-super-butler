@@ -71,7 +71,9 @@ export interface Account {
   remark?: string
   pause_duration?: number
   username?: string
-  login_password?: string
+  has_password?: boolean
+  has_cookie?: boolean
+  credential_status?: string
   show_browser?: boolean
   disable_reason?: string
   created_at?: string

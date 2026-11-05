@@ -5,6 +5,7 @@ description = "鱼太咸 - Scheduler服务"
 requires-python = ">=3.11"
 
 dependencies = [
+    "cryptography==50.0.2",
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
     "sqlalchemy>=2.0.0",

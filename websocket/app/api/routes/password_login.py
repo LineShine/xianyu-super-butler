@@ -18,7 +18,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import update
@@ -26,7 +26,13 @@ from sqlalchemy import update
 from common.models.token_cache import TokenCache
 from common.utils.time_utils import get_beijing_now_naive
 
-router = APIRouter(prefix="/password-login", tags=["密码登录"])
+async def require_login_channel(x_internal_token: str | None = Header(None)):
+    from app.core.config import get_settings
+    from common.utils.internal_auth import require_valid_internal_token
+    require_valid_internal_token(x_internal_token, get_settings().internal_api_token)
+
+
+router = APIRouter(prefix="/password-login", tags=["密码登录"], dependencies=[Depends(require_login_channel)])
 
 
 # ==================== 请求/响应模型 ====================
@@ -558,7 +564,9 @@ async def password_login(request: PasswordLoginRequest):
 
 
 @router.get("/check/{session_id}", response_model=LoginStatusResponse)
-async def check_login_status(session_id: str):
+async def check_login_status(session_id: str, user_id: int = Query(...)):
+    if password_login_sessions.get(session_id, {}).get("user_id") != user_id:
+        raise HTTPException(404, "会话不存在")
     """
     检查账号密码登录状态
     
@@ -618,7 +626,9 @@ async def check_login_status(session_id: str):
 
 
 @router.delete("/cancel/{session_id}")
-async def cancel_login(session_id: str):
+async def cancel_login(session_id: str, user_id: int = Query(...)):
+    if password_login_sessions.get(session_id, {}).get("user_id") != user_id:
+        raise HTTPException(404, "会话不存在")
     """取消登录会话"""
     try:
         if session_id not in password_login_sessions:

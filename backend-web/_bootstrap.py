@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import faulthandler
 import sys
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from fastapi.responses import JSONResponse
 from app.core.config import get_settings
 from common.db.error_messages import get_public_database_error_message
 from common.db.redis_client import close_redis_client, initialize_redis_client
+from common.security.runtime import after_activation, ActivationMiddleware
 from common.utils.logging_utils import setup_logging
 from common.utils.network_utils import resolve_listen_host
 
@@ -39,7 +41,7 @@ settings = get_settings()
 
 # 配置日志（控制台 + 文件 + 第三方库拦截）
 setup_logging(
-    log_file=Path(__file__).parent / "logs" / "backend-web.log",
+    log_file=Path(os.environ.get("YTX_LOG_DIR", str(Path(__file__).parent / "logs"))) / "backend-web.log",
     log_level=settings.log_level,
     third_party_loggers=["uvicorn", "uvicorn.error", "uvicorn.access", "fastapi", "httpx", "httpcore", "sqlalchemy"],
 )
@@ -69,6 +71,14 @@ async def check_database_connection():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from common.security.runtime import runtime_owner
+    async with runtime_owner("backend-web"):
+        async with _service_lifespan(app):
+            yield
+
+
+@asynccontextmanager
+async def _service_lifespan(app: FastAPI):
     """应用生命周期管理"""
     logger.info(f"{settings.project_name} 启动中...")
     logger.info(f"服务端口: {settings.service_port}")
@@ -90,15 +100,22 @@ async def lifespan(app: FastAPI):
     try:
         from common.db.init_database import init_database
         await init_database()
+        from common.security.runtime import connect, migrate
+        def migrate_new_tables():
+            with connect() as connection:
+                migrate(connection)
+        await asyncio.to_thread(migrate_new_tables)
     except Exception as e:
-        logger.error(f"数据库初始化失败: {e}")
+        logger.error("数据库初始化失败，停止启动")
+        raise
     
     # 自检 JWT 密钥：弱/默认值时自动生成强随机密钥并持久化（源码启动兜底）
     try:
         from app.services.jwt_secret_service import ensure_jwt_secret_key
         await ensure_jwt_secret_key(settings)
     except Exception as e:
-        logger.error(f"JWT 密钥自检失败: {e}")
+        logger.error("JWT 密钥自检失败，停止启动")
+        raise
 
     # 初始化服务间 API 令牌，多个服务通过数据库共享同一令牌。
     try:
@@ -138,22 +155,19 @@ async def lifespan(app: FastAPI):
     logger.info(f"静态文件目录: {static_path.absolute()}")
     logger.info("所有上传子目录已创建")
     
-    # 启动 Goofish 定时采集任务（可通过配置禁用）
+    activation_task = None
     if settings.auto_start_crawl_jobs:
-        try:
-            await start_goofish_crawl_jobs()
-        except Exception as e:
-            logger.error(f"启动 Goofish 定时采集任务失败: {e}")
-    else:
-        logger.info("已禁用自动启动Goofish定时采集任务（AUTO_START_CRAWL_JOBS=false）")
-    
+        activation_task = asyncio.create_task(after_activation(start_goofish_crawl_jobs))
     from app.services.manual_captcha_service import manual_captcha_manager
-    manual_verification_queue_task = asyncio.create_task(manual_captcha_manager.run_queue())
+    manual_verification_queue_task = asyncio.create_task(after_activation(manual_captcha_manager.run_queue))
 
     yield
     
     logger.info(f"{settings.project_name} 关闭中...")
 
+    if activation_task is not None:
+        activation_task.cancel()
+        await asyncio.gather(activation_task, return_exceptions=True)
     manual_verification_queue_task.cancel()
     await asyncio.gather(manual_verification_queue_task, return_exceptions=True)
     await manual_captcha_manager.shutdown()
@@ -244,6 +258,7 @@ app = FastAPI(
     version=settings.version,
     lifespan=lifespan,
 )
+app.add_middleware(ActivationMiddleware)
 
 # 配置CORS
 app.add_middleware(

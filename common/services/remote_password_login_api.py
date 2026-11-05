@@ -64,8 +64,8 @@ def validate_remote_password_login_settings(url: str, secret_key: str) -> str | 
         return "选择协议登录时必须填写秘钥"
 
     parsed = urlparse(clean_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return "远程URL格式无效，请填写以 http:// 或 https:// 开头的完整地址"
+    if parsed.scheme != "https" or not parsed.netloc:
+        return "远程URL格式无效，请填写以 https:// 开头的完整地址"
     return None
 
 
@@ -112,6 +112,7 @@ async def test_remote_password_login_interface(
                 str(url).strip(),
                 json=payload,
                 headers={"X-API-Key": str(secret_key).strip()},
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=timeout_seconds),
             ) as response:
                 status_code = response.status
@@ -208,6 +209,7 @@ async def solve_remote_x5sec_login(
                 str(url).strip(),
                 json=payload,
                 headers={"X-API-Key": str(secret_key).strip()},
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=timeout_seconds),
             ) as response:
                 status_code = response.status

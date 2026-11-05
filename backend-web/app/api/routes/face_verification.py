@@ -6,7 +6,9 @@
 - 查询特定账号的验证信息
 - 获取和删除验证截图
 """
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi.responses import FileResponse
+from common.security.private_captures import capture_root, capture_url, safe_subject, verify_capture
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, desc
 from datetime import datetime, timedelta
@@ -361,11 +363,11 @@ async def get_face_verification_screenshot(
         
         # 查找截图文件 - 使用统一的静态文件根目录（兼容Docker共享卷）
         from app.core.paths import STATIC_ROOT
-        screenshot_dir = STATIC_ROOT / "uploads" / "face"
+        screenshot_dir = capture_root()
         
         # 查找该账号的所有截图（可能有多个带时间戳的）
         import glob
-        pattern = str(screenshot_dir / f"face_verify_{account_id}_*.jpg")
+        pattern = str(screenshot_dir / f"face_verify_{safe_subject(account_id)}_*.jpg")
         screenshot_files = glob.glob(pattern)
         
         if not screenshot_files:
@@ -389,7 +391,7 @@ async def get_face_verification_screenshot(
         screenshot_data = {
             "filename": screenshot_filename,
             "account_id": account_id,
-            "path": f"/static/uploads/face/{screenshot_filename}",
+            "path": capture_url(screenshot_filename),
             "size": file_stat.st_size,
             "created_time": created_time,
             "created_time_str": created_time_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -452,11 +454,11 @@ async def delete_face_verification_screenshot(
         
         # 查找并删除截图文件 - 使用统一的静态文件根目录（兼容Docker共享卷）
         from app.core.paths import STATIC_ROOT
-        screenshot_dir = STATIC_ROOT / "uploads" / "face"
+        screenshot_dir = capture_root()
         
         # 查找该账号的所有截图
         import glob
-        pattern = str(screenshot_dir / f"face_verify_{account_id}_*.jpg")
+        pattern = str(screenshot_dir / f"face_verify_{safe_subject(account_id)}_*.jpg")
         screenshot_files = glob.glob(pattern)
         
         deleted_count = 0
@@ -483,3 +485,11 @@ async def delete_face_verification_screenshot(
             message=f"删除失败: {str(e)}",
             data=None
         )
+
+
+@router.get("/image/{filename}")
+async def private_image(filename: str, expires: int, signature: str):
+    path = verify_capture(filename, expires, signature)
+    if path is None:
+        raise HTTPException(404, "截图不存在或访问链接已过期")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})

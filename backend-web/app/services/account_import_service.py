@@ -179,10 +179,6 @@ class AccountImportService:
                 continue
 
             cookie = _parse_str(row.get("Cookie"))
-            if not cookie:
-                self.errors.append(f"账号 {account_id}: Cookie为空，跳过")
-                self.failed += 1
-                continue
 
             # 确定状态
             status = _parse_str(row.get("状态")) or "active"
@@ -196,10 +192,15 @@ class AccountImportService:
             )
             result = await self.session.execute(stmt)
             existing = result.scalars().first()
+            if not existing and not cookie:
+                self.errors.append(f"账号 {account_id}: 新账号未包含凭据，请先登录后再导入配置")
+                self.failed += 1
+                continue
 
             if existing:
-                # 更新
-                existing.cookie = cookie
+                # Ordinary exports omit secrets; importing settings preserves them.
+                if cookie:
+                    existing.cookie = cookie
                 existing.status = status
                 existing.remark = _parse_str(row.get("备注")) or existing.remark
                 existing.username = _parse_str(row.get("用户名")) or existing.username
@@ -679,13 +680,14 @@ class AccountImportService:
 
     async def _get_accounts_to_start(self, enable_all: bool) -> list[tuple[str, str]]:
         """获取需要启动的账号列表 [(account_id, cookie)]"""
-        stmt = select(YtxAccount.account_id, YtxAccount.cookie, YtxAccount.status).where(
+        stmt = select(YtxAccount).where(
             YtxAccount.owner_id == self.owner_id,
             YtxAccount.account_id.in_(list(self._account_id_to_pk.keys())),
         )
         result = await self.session.execute(stmt)
         accounts_to_start = []
-        for account_id, cookie, status in result.all():
+        for account in result.scalars().all():
+            account_id, cookie, status = account.account_id, account.cookie, account.status
             if not cookie or not cookie.strip():
                 continue
             if enable_all or status == "active":

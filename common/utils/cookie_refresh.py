@@ -77,10 +77,16 @@ def normalize_browser_cookie_snapshot(cookies: list[dict[str, Any]] | None) -> l
     )
 
 
-def get_cookie_refresh_snapshot(metadata_json: dict[str, Any] | None) -> list[dict[str, Any]]:
+def get_cookie_refresh_snapshot(metadata_json: dict[str, Any] | None, *, account=None) -> list[dict[str, Any]]:
     if not isinstance(metadata_json, dict):
         return []
     snapshot = metadata_json.get(COOKIE_REFRESH_SNAPSHOT_KEY)
+    if isinstance(snapshot, str):
+        import json
+        from common.security.vault import decrypt, account_context, CredentialUnavailable
+        if account is None:
+            raise CredentialUnavailable("浏览器凭据缺少账号上下文")
+        snapshot = json.loads(decrypt(snapshot, account_context(account, "browser_snapshot")))
     if not isinstance(snapshot, list):
         return []
     return normalize_browser_cookie_snapshot(snapshot)

@@ -294,11 +294,10 @@ async def _update_account_cookies(
         new_cookies_str: 新的Cookie字符串
     """
     try:
-        await db.execute(
-            update(YtxAccount)
-            .where(YtxAccount.account_id == account_id)
-            .values(cookie=new_cookies_str)
-        )
+        account = (await db.execute(select(YtxAccount).where(
+            YtxAccount.account_id == account_id).with_for_update())).scalar_one_or_none()
+        if account is not None:
+            account.cookie = new_cookies_str
         await db.commit()
         logger.info(f"【{account_id}】头像查询后已更新Cookie到数据库")
     except Exception as e:

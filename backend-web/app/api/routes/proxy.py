@@ -4,10 +4,10 @@
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from loguru import logger
@@ -28,6 +28,16 @@ class ProxyConfig(BaseModel):
     proxy_port: Optional[int] = None
     proxy_user: Optional[str] = None
     proxy_pass: Optional[str] = None
+    has_proxy_password: bool = False
+    password_action: Literal["preserve", "replace", "clear"] = "preserve"
+
+    @model_validator(mode="after")
+    def validate_secret_action(self):
+        if self.password_action == "replace" and not self.proxy_pass:
+            raise ValueError("替换代理密码时必须提供新密码")
+        if self.password_action != "replace" and self.proxy_pass:
+            raise ValueError("提交新密码时必须选择替换")
+        return self
 
 
 class ProxyConfigResponse(BaseModel):
@@ -67,7 +77,7 @@ async def get_proxy_config(
             proxy_host=account.proxy_host,
             proxy_port=account.proxy_port,
             proxy_user=account.proxy_user,
-            proxy_pass=account.proxy_pass,
+            has_proxy_password=bool(account._proxy_pass),
         )
         
         return ProxyConfigResponse(
@@ -132,7 +142,10 @@ async def update_proxy_config(
         account.proxy_host = config.proxy_host if config.proxy_type != "none" else None
         account.proxy_port = config.proxy_port if config.proxy_type != "none" else None
         account.proxy_user = config.proxy_user if config.proxy_type != "none" else None
-        account.proxy_pass = config.proxy_pass if config.proxy_type != "none" else None
+        if config.password_action == "clear" or config.proxy_type == "none":
+            account.proxy_pass = None
+        elif config.password_action == "replace":
+            account.proxy_pass = config.proxy_pass
         
         session.add(account)
         await session.commit()

@@ -71,7 +71,7 @@ class CookiesRefreshService:
     def _build_cookie_payloads(self, account: CookiesRefreshAccountContext) -> list[dict[str, Any]]:
         """构造 Playwright 可识别的 Cookie 列表。"""
         cookie_payloads = build_playwright_cookie_payloads_from_snapshot(
-            get_cookie_refresh_snapshot(account.metadata_json)
+            get_cookie_refresh_snapshot(account.metadata_json, account=account)
         )
         if cookie_payloads:
             return cookie_payloads
