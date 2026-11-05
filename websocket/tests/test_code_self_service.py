@@ -249,10 +249,50 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         self.api.assert_not_awaited()
         self.runner.assert_not_awaited()
 
-    async def test_each_invalid_reply_gets_hint_no_trim_or_unicode_conversion(self):
+    async def test_order_edge_whitespace_is_trimmed_for_validation_and_quota_only(self):
+        for index, (prefix, suffix) in enumerate((('', '\n'), (' ', ''), ('\r\n\t ', ' \t\r\n'),
+                                                ('\u3000\u00a0', '\u00a0\u3000'))):
+            with self.subTest(prefix=repr(prefix), suffix=repr(suffix)):
+                order, chat = str(int(ORDER) + index), f'whitespace-{index}'
+                original = prefix + order + suffix
+                await self.begin(chat=chat)
+                event = await self.submit(original, chat=chat)
+                self.assertEqual(self.sent()[-3:], [self_service.PROCESSING, '口令生成', 'aB09zZ'])
+                self.assertEqual(self.api.await_args.kwargs['order_no'], order)
+                attempt = next(a for a in self.attempts() if a.order_no == order)
+                self.assertEqual((attempt.quota_state, attempt.quota_used), ('success', 1))
+                log = next(r for r in self.records() if r.id == attempt.log_id)
+                self.assertEqual(log.order_no, order)
+                self.assertEqual(log.source_message, original)
+                self.assertEqual(log.raw_message_json, event['raw_message'])
+                self.assertEqual(event['send_message'], original)
+                forwarded = deepcopy(event)
+                forwarded['raw_message']['transport'] = 'web'
+                await self.auto.handle(forwarded, self.ws)
+                self.assertEqual(self.runner.await_count, index + 1)
+
+    async def test_whitespace_variants_share_order_cooldown_and_daily_quota(self):
+        await self.begin()
+        await self.submit(ORDER + '\n')
+        await self.begin(chat='other-chat')
+        await self.submit(' ' + ORDER, chat='other-chat')
+        self.assertIn('秒后再领取', self.sent()[-1])
+        self.runner.assert_awaited_once()
+        for original in ('\r\n' + ORDER, ORDER + '\t', ' ' + ORDER + '\n'):
+            self.clock += self_service.WINDOW_MS + 1
+            await self.begin()
+            await self.submit(original)
+        self.assertEqual(self.sent()[-1], self_service.LIMIT_HINT)
+        self.assertEqual(self.runner.await_count, 3)
+        self.assertEqual(sum(a.quota_state == 'success' for a in self.attempts()), 3)
+        self.assertEqual({a.order_no for a in self.attempts() if a.order_no}, {ORDER})
+
+    async def test_each_invalid_reply_gets_hint_without_extracting_or_converting_digits(self):
         await self.begin()
         expiry = self.flows()[0].expires_ms
-        invalid_texts = ('订单号' + ORDER, ' ' + ORDER, ORDER + '\n', '１２３４', '9' * 65, '你好', '你好')
+        invalid_texts = ('订单号' + ORDER, ' 订单号：' + ORDER + '\n', ORDER[:5] + ' ' + ORDER[5:],
+                         ORDER[:5] + '\n' + ORDER[5:], '１２３４', ' １２３４\n', '9' * 65,
+                         ' ' + '9' * 65 + '\n', '', ' \t\r\n', ORDER + '\u200b', '你好', '你好')
         for index, text in enumerate(invalid_texts, 1):
             await self.auto.handle(self.event(text), self.ws)
             self.assertEqual(self.sent(), [self_service.PROMPT] + [self_service.FORMAT_HINT] * index)
@@ -266,6 +306,19 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         self.api.assert_not_awaited()
         await self.submit()
         self.runner.assert_awaited_once()
+
+    async def test_trimmed_order_still_requires_plain_buyer_text(self):
+        await self.begin()
+        quoted = self.event(' ' + ORDER + '\n')
+        quoted['raw_message']['1']['6']['3']['5'] = json.dumps({
+            'contentType': 1, 'text': {'text': quoted['send_message']}, 'quote': {'text': 'quoted'}})
+        card = self.event(' ' + ORDER + '\n')
+        card['is_plain_text'] = False
+        for event in (quoted, card):
+            await self.auto.handle(event, self.ws)
+        self.assertEqual(self.sent(), [self_service.PROMPT] + [self_service.FORMAT_HINT] * 2)
+        self.api.assert_not_awaited()
+        self.runner.assert_not_awaited()
 
     async def test_format_hint_deduplicates_replays_but_new_replies_after_restart_get_hint(self):
         await self.begin()

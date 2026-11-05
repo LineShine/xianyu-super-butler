@@ -197,6 +197,8 @@ class CodeSelfService:
         chat, buyer = normalize_id(message['chat_id']), normalize_id(message['send_user_id'])
         plain = is_plain_chat_message(message)
         keyword = plain and '口令' in message.get('send_message', '')
+        # Normalize only the buyer's order input; retain original text for logs and deduplication.
+        order_no = message['send_message'].strip() if plain else ''
         async with async_session_maker() as db:
             account = await self._account(db)
             if account is None:
@@ -234,7 +236,7 @@ class CodeSelfService:
                     reason, detail = 'code_context', '消息商品不匹配'
                 elif flow.state != 'waiting':
                     reason = 'code_flow_busy'
-                elif plain and re.fullmatch(r'[0-9]{1,64}', message.get('send_message', '')):
+                elif plain and re.fullmatch(r'[0-9]{1,64}', order_no):
                     kind = 'order'
                 else:
                     # 等待订单号时，每条格式错误的新消息（含再次询问“口令”）都提示。
@@ -273,7 +275,7 @@ class CodeSelfService:
                 flow.state = {'prompt': 'prompting', 'format': 'notifying', 'order': 'checking'}[kind]
                 flow.active_attempt_id = key
                 flow.busy_until_ms = attempt.busy_until_ms = now + BUSY_MS
-                attempt.order_no = message['send_message'] if kind == 'order' else None
+                attempt.order_no = order_no if kind == 'order' else None
                 log.order_no = attempt.order_no
                 action = Action(kind, key, Claim(log.id, account.id, account.owner_id, chat, buyer,
                     flow.item_id, flow.enabled_at_ms, timestamp, code_timing.receipt(message)), attempt.order_no)
