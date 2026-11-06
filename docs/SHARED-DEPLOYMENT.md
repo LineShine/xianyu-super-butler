@@ -14,6 +14,12 @@ bash dev.sh stop                  # 停止当前应用和本机基础服务；�
 
 双击 `启动鱼太咸.command` 会启动或重启原生应用；`停止鱼太咸.command` 完整停止。首次从旧启动器升级允许一次基础服务重启，以后切换只重启应用。单独关闭 Docker Desktop 后，只要确认数据库中的应用锁已经释放，原生模式可以独立启动。
 
+Docker 模式双击 `启动鱼太咸Docker.command` 即可。脚本会自动打开 Docker Desktop 并等待引擎就绪（最长 180 秒），随后启动本机 MySQL、Redis、检查连接、停止旧应用并生成本次任务启用标记；无需再去 Docker App 点击 Start。需要已安装支持 `docker desktop start` 的 Docker Desktop。命令行仍可在引擎运行时执行 `bash dev.sh switch docker`。
+
+双击 `停止鱼太咸Docker.command` 会等待当前实例任务退出，再停止本机数据库，保留数据、密钥和镜像。它复用完整停止入口，不退出 Docker Desktop，不操作其他 Docker 项目；若当前已切回原生，则完整停止同一实例的原生应用和数据库。
+
+**Docker App 的项目 Start 按钮只启动现有容器，不能代替模式切换入口。** 当前 Mac 项目没有 MySQL、Redis 容器；电脑重启或完整停止后，直接点 Start 会因宿主机数据库未运行而出现 `Can't connect to MySQL server on 'host.docker.internal'`，随后显示 `backend-web exited (3)` / `dependency failed to start`。此外，切回原生后保存的旧容器也不能直接作为新的 Docker 运行实例使用。遇到这些情况执行统一启动入口即可，不要创建替代数据库或删除数据目录。
+
 `bash docker.sh prepare|build|start|stop|restart|status|logs|update` 提供 Docker 操作入口。Mac 的 `start` 等价于 `dev.sh switch docker`，`update` 重新构建当前工作区源码并重启 Docker 应用；不会执行 git pull 或修改源码。
 
 ## 共享内容与边界
@@ -28,6 +34,8 @@ bash dev.sh stop                  # 停止当前应用和本机基础服务；�
 | 账号任务 | 相同数据库中的服务所有权锁，加上统一启动器的模式互斥和健康检查开关 |
 
 `yutaixian_data/instance.json` 记录非密钥的实例标识、数据库提供方式、应用模式、库名、Redis DB 及密钥路径。根 `.env` 仍保留现有数据库连接凭证；不要删除或替换。运行状态位于 `yutaixian_data/local_dev`，其中 `infrastructure.json` 与 `state.json` 分别记录数据库和原生应用。
+
+实例描述可通过 `docker_project_name` 指定 Docker 项目名，例如 `yutaixian`。Docker Compose 项目名仅支持小写英文字母、数字、下划线和连字符，不能使用中文；未指定时仍按实例 ID 生成独立名称。更名应经统一启动器重启应用；启动前会检查目标名称的容器归属，拒绝接管其他实例。项目名不会改变实例 ID、密钥或数据库。
 
 Mac 容器通过 `host.docker.internal` 访问本机端口，默认 MySQL 24306、Redis 27379。启动器会在实际目标容器中验证连接、MySQL UUID、Redis run ID、实例、密钥和凭据格式；失败时保留旧应用，不扩大数据库监听，不新建替代数据库。参见 [Docker Desktop 宿主机网络说明](https://docs.docker.com/desktop/features/networking/networking-how-tos/#connect-a-container-to-a-service-on-the-host)。
 

@@ -1,5 +1,10 @@
 .git
 .codex
+# Finder/Explorer metadata must not invalidate or enter application images.
+**/.DS_Store
+**/._*
+**/Thumbs.db
+**/desktop.ini
 .env
 **/.env
 **/.env.*

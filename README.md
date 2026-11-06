@@ -6,6 +6,8 @@
 
 macOS 双击 **启动鱼太咸.command**：未运行时直接启动，已运行时安全重启原生应用，保持本机数据库运行（首次升级管理器例外），无需先点击停止脚本。启动完成后会打开 <http://127.0.0.1:9999>。只需停止时，双击 **停止鱼太咸.command**。
 
+使用 Mac Docker 模式时，双击 **启动鱼太咸Docker.command** 即可：脚本会自动打开 Docker Desktop、等待引擎就绪，再启动共用的本机 MySQL、Redis 和应用容器，无需另外点击 Docker App 的 Start。双击 **停止鱼太咸Docker.command** 会完整停止当前实例的应用和本机数据库，保留数据、密钥、镜像，不退出 Docker Desktop，也不停止其他项目。Docker App 项目的 Start 按钮只启动容器，不能代替统一入口；本机数据库关闭时直接点击会导致后端连接失败。
+
 首次运行需要联网，脚本会准备 Homebrew、Python、Node.js、MySQL、Redis 和浏览器组件。支持 macOS 与 Homebrew Linux，不需要 Docker。Homebrew 安装可能要求输入电脑的系统密码；下载中断后重新运行即可。
 
 也可以在项目目录使用终端：

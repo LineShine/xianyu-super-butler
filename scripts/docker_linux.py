@@ -45,6 +45,7 @@ def main():
             deployment.stop_apps()
             deployment.compose(["stop", "--timeout", "180", "mysql", "redis"], label="停止容器基础服务并保留数据")
         else:
+            deployment.check_project_ownership(instance)
             if args.command == "start" and deployment.healthy():
                 print("容器应用已运行；未重复启动。")
                 return

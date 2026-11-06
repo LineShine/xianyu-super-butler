@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -28,6 +29,45 @@ class DockerDeployment:
         except (OSError, subprocess.SubprocessError):
             raise RuntimeError("Docker 引擎或 Compose 不可用，请启动 Docker Desktop；原模式未停止") from None
 
+    @staticmethod
+    def project_name(instance):
+        name = instance.get("docker_project_name", "ytx-" + instance["instance_id"][:12])
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name):
+            raise RuntimeError("Docker 项目名称只能包含小写英文字母、数字、下划线和连字符，且须以字母或数字开头")
+        return name
+
+    def check_project_ownership(self, instance):
+        """Do not let Compose adopt containers owned by a different instance."""
+        name = self.project_name(instance)
+        try:
+            result = subprocess.run(
+                ["docker", "container", "ls", "--all", "--no-trunc", "--filter",
+                 f"label=com.docker.compose.project={name}", "--format", "{{.ID}}"],
+                capture_output=True, text=True, timeout=20,
+            )
+            if result.returncode:
+                raise ValueError("container listing failed")
+            containers = result.stdout.split()
+            if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in containers):
+                raise ValueError("invalid container listing")
+            if not containers:
+                return
+            # Only two ownership labels; never retrieve Env or raw inspect JSON.
+            labels_format = '[{{json (index .Config.Labels "com.docker.compose.project")}},{{json (index .Config.Labels "org.yutaixian.instance")}}]'
+            result = subprocess.run(
+                ["docker", "container", "inspect", "--format", labels_format, *containers],
+                capture_output=True, text=True, timeout=20,
+            )
+            if result.returncode:
+                raise ValueError("container inspection failed")
+            labels = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+            if len(labels) != len(containers):
+                raise ValueError("incomplete container inspection")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            raise RuntimeError("无法确认 Docker 项目名称的占用及归属，未修改项目配置") from None
+        if any(label != [name, instance["instance_id"]] for label in labels):
+            raise RuntimeError(f"Docker 项目名称 {name} 已被其他实例或未知容器占用，拒绝接管")
+
     def fingerprint(self):
         digest = hashlib.sha256()
         excluded = {".git", ".venv", "venv", "node_modules", "__pycache__", "logs", "tests", "browser_data", "browser_runtime", "backups", "private", "dist", "uploads"}
@@ -36,6 +76,9 @@ class DockerDeployment:
             for parent, directories, files in os.walk(self.root / directory):
                 directories[:] = sorted(name for name in directories if name not in excluded and not name.startswith(".") and not name.endswith(".egg-info") and name != "build")
                 for name in files:
+                    # Match .dockerignore: Finder/Explorer metadata is not image input.
+                    if name in {".DS_Store", "Thumbs.db", "desktop.ini"} or name.startswith("._"):
+                        continue
                     if name.startswith(".env") or name.endswith((".pyc", ".log")) or name == "keyring.json":
                         continue
                     path = Path(parent) / name
@@ -63,6 +106,7 @@ class DockerDeployment:
         write_json(self.stack.runtime / "images.json", built)
 
     def config(self, instance, runtime, *, full=False, preflight=False):
+        project_name = self.project_name(instance)
         source = read_config(self.root)
         images = read_json(self.stack.runtime / "images.json")
         if images.get("source_fingerprint") != self.fingerprint():
@@ -110,6 +154,7 @@ class DockerDeployment:
         if full:
             settings = values(self.root)
             services["mysql"] = {"image": "mysql:8.4", "restart": "unless-stopped",
+                "labels": {"org.yutaixian.instance": instance["instance_id"]},
                 "command": ["--max-connections=4000", "--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--default-time-zone=+08:00"],
                 "environment": {key: settings[key].replace("$", "$$") for key in ("MYSQL_ROOT_PASSWORD", "MYSQL_DATABASE", "MYSQL_USER", "MYSQL_PASSWORD")},
                 "volumes": [{"type": "bind", "source": str(data / "docker/mysql"), "target": "/var/lib/mysql"}],
@@ -121,24 +166,27 @@ class DockerDeployment:
             for name in ("mysql", "redis"):
                 (data / "docker" / name).mkdir(parents=True, exist_ok=True, mode=0o700)
             services["redis"] = {"image": "redis:7.4-alpine", "restart": "unless-stopped",
+                "labels": {"org.yutaixian.instance": instance["instance_id"]},
                 "environment": {"REDIS_PASSWORD": settings["REDIS_PASSWORD"].replace("$", "$$")},
                 "healthcheck": {"test": ["CMD-SHELL", 'REDISCLI_AUTH="$${REDIS_PASSWORD}" redis-cli ping | grep -q PONG'], "interval": "5s", "timeout": "5s", "retries": 30},
                 "command": ["redis-server", "/usr/local/etc/redis.conf"],
                 "volumes": [{"type": "bind", "source": str(data / "docker/redis"), "target": "/data"},
                             {"type": "bind", "source": str(redis_conf), "target": "/usr/local/etc/redis.conf", "read_only": True}],
                 "stop_grace_period": "180s"}
-        return {"name": "ytx-" + instance["instance_id"][:12], "services": services}
+        return {"name": project_name, "services": services}
 
     def compose(self, args, *, path=None, label="Docker 操作"):
         self.stack.command(["docker", "compose", "-f", str(path or self.path), *args], label=label)
 
     def preflight_shared(self, instance):
+        self.check_project_ownership(instance)
         candidate = self.stack.runtime / "compose-preflight.json"
         private_json(candidate, self.config(instance, {"runtime_id": "preflight"}, preflight=True))
         self.compose(["run", "--rm", "--no-deps", "backend-web", "python", "/app/preflight.py"], path=candidate,
                      label="在真实容器中检查本机 MySQL、Redis、实例和密钥")
 
     def start_apps(self, instance, runtime, *, full=False):
+        self.check_project_ownership(instance)
         private_json(self.path, self.config(instance, runtime, full=full))
         self.compose(["up", "-d", "--wait", "--wait-timeout", "300", *APPS], label="启动并检查 Docker 应用健康状态")
 

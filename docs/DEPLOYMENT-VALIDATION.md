@@ -1,15 +1,27 @@
 # 部署与凭据加密验收记录
 
-验收日期：2026-11-05。环境：当前 Apple Silicon Mac；容器测试使用本机 Docker Desktop 的 Linux 容器环境。Windows 仅交付框架。
+首次验收日期：2026-11-05；最近复验：2026-11-06。环境：当前 Apple Silicon Mac；容器测试使用本机 Docker Desktop 的 Linux 容器环境。Windows 仅交付框架。
 
-## 当前 Mac 实例
+## 2026-11-06：Docker 启动恢复及更名复验
+
+- 已定位 Docker App 直接 Start 失败：宿主机 MySQL、Redis 未运行，backend-web 连接 `host.docker.internal` 被拒绝，退出码 3；其他应用因依赖后端健康检查而无法启动。
+- 经统一入口恢复，项目名按用户确认改为 `yutaixian`，实例 ID、密钥和本机数据库保持不变。旧 `ytx-<实例前12位>` 项目的四个已停止应用容器及空网络已清理，未删除数据、密钥或镜像，未操作其他 Docker 项目。
+- 新增 `启动鱼太咸Docker.command` 与 `停止鱼太咸Docker.command`。启动入口自动调用 Docker Desktop 启动命令并等待引擎，随后启动本机基础服务与容器；停止入口完整停止当前实例，保留 Docker Desktop 和其他项目。
+- 实测两个脚本完成停止 → 启动：四个应用健康、两个账号 connected；原 MySQL UUID、账号数量保留，Redis 在完整停止后正常重启，专用测试键的值和自然剩余 TTL 保留。该测试键已移除。
+- 两个账号、四条 IM Token 记录逐项解密校验通过；三个服务持有各自的独占运行锁，并属于同一次启动。
+- 排除 Finder/Explorer 元数据对源码指纹与构建上下文的影响。部署专项 13 项测试通过；根目录测试共 30 项，28 项通过、2 项依赖临时本机数据库的测试本轮未启用。Shell 语法与 git diff 检查通过。
+- 自动启动命令在 Docker Desktop 已运行时实测通过；此次未为测试自动打开功能而再次关闭整个 Docker 引擎。最终保留 Docker 应用模式运行。
+
+本次运行结果保存在本机 `yutaixian_data/local_dev/docker-recovery-check.json`，不包含凭据或主密钥。
+
+## 2026-11-05：首次实施验收
 
 - 旧的应用与数据库合并管理器已拆分；首次升级进行了一次受控基础服务重启。
 - 原 MySQL 实例 UUID 和账号数量保留；现有 2 个账号、4 条 IM Token 记录完成加密迁移，并通过逐项解密校验。
 - 已实际完成原生 → Docker → 原生切换。正常切换前后 MySQL UUID、拆分后的 Redis run ID 保持一致；临时验证键的值与自然剩余 TTL 保持连续，验证键已清理。
 - Docker 共用模式只运行四个应用容器，连接现有本机数据库，没有为当前实例建立第二套 MySQL / Redis。
 - 最后恢复原生模式并关闭 Docker Desktop；前端和三个后端均返回健康响应，2 个账号的消息连接均处于 connected 状态。
-- 当前配置为 `database_provider=native`、`application_mode=native`。实例与密钥保持原样；主密钥存放在源码目录之外，权限为 600。
+- 当次验收结束配置为 `database_provider=native`、`application_mode=native`。实例与密钥保持原样；主密钥存放在源码目录之外，权限为 600。
 
 当前实例的非敏感检查结果保存在本机 `yutaixian_data/local_dev/upgrade-verification.json`。该运行目录不提交到版本库。
 
