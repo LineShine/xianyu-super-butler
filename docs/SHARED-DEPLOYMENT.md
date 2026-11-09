@@ -86,4 +86,4 @@ backend-web/.venv/bin/python scripts/verify_shared_deployment.py --full
 
 不带 `--full` 的命令创建临时本机数据库、Redis、密钥及应用，执行原生→Docker→原生的订单、凭据、文件及 TTL 往返验证；`--full` 则在 Docker 的 Linux 环境中验证全新六容器部署及应用重启保留数据库。成功后清理测试资源，不连接真实闲鱼账号。测试失败时保留临时诊断目录并停止测试服务。
 
-Windows 此次仅交付两个 BAT、PowerShell 入口/适配接口、依赖清单、安装模板和构建入口。后续按 [Windows AI 交接说明](../launcher/windows/AI-HANDOFF.md) 在 Windows 完成原生适配及验收；目前没有可用 EXE，也没有新增 GitHub Actions。
+Windows 已增加源码本地运行入口，准备、启动、应用重启、停止及状态查询见 [Windows 本地运行说明](WINDOWS.md)。Windows 的物理数据库与当前机器的实例绑定，不会自动打开 Mac 的数据目录。EXE 安装器仍需独立打包验收。

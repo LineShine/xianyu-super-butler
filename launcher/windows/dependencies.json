@@ -1,15 +1,91 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "platform": "windows-x86_64",
-  "status": "framework-requires-windows-validation",
+  "status": "native-runtime",
   "dependencies": [
-    {"name": "python", "version": "3.12", "source": "https://www.python.org/downloads/windows/", "sha256": null},
-    {"name": "node", "version": "22", "source": "https://nodejs.org/en/download", "sha256": null},
-    {"name": "mysql", "version": "8.4", "source": "https://dev.mysql.com/downloads/mysql/", "sha256": null},
-    {"name": "redis", "version": null, "source": null, "sha256": null, "note": "Select a maintained Windows community build, pin exact release and SHA256 on Windows; do not download until verified."},
-    {"name": "inno-setup", "version": "6", "source": "https://jrsoftware.org/isinfo.php", "sha256": null}
+    {
+      "name": "python",
+      "version": "3.12.12",
+      "source": "https://github.com/astral-sh/python-build-standalone/releases/download/20251014/cpython-3.12.12%2B20251014-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+      "sha256": "3c8b9b10a933909c98b9916297e2093b24a9c2abaa23df1c2622c2bfe052cb94",
+      "archive": "tar.gz",
+      "executable": "python/python.exe",
+      "checksum_source": "https://github.com/astral-sh/python-build-standalone/releases/expanded_assets/20251014",
+      "note": "CPython portable build published by Astral; no machine-wide installation."
+    },
+    {
+      "name": "node",
+      "version": "22.21.1",
+      "source": "https://nodejs.org/download/release/v22.21.1/node-v22.21.1-win-x64.zip",
+      "sha256": "3c624e9fbe07e3217552ec52a0f84e2bdc2e6ffa7348f3fdfb9fbf8f42e23fcf",
+      "archive": "zip",
+      "executable": "node-v22.21.1-win-x64/node.exe",
+      "checksum_source": "https://nodejs.org/download/release/v22.21.1/SHASUMS256.txt"
+    },
+    {
+      "name": "mysql",
+      "version": "8.4.13",
+      "source": "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.13-winx64.zip",
+      "sha256": "e9cd98b1d23f122987b1afca26ad942efec5891481103d48ae3cde237fa3ea54",
+      "archive": "zip",
+      "executable": "mysql-8.4.13-winx64/bin/mysqld.exe",
+      "checksum_source": "https://community.chocolatey.org/packages/mysql/8.4.13"
+    },
+    {
+      "name": "redis",
+      "version": "7.4.8",
+      "source": "https://github.com/redis-windows/redis-windows/releases/download/7.4.8/Redis-7.4.8-Windows-x64-cygwin.zip",
+      "sha256": "dfff263f5e8ccaf48e07b859f8dc2426f6272f369e988fc2d73edfb065e9e4c4",
+      "archive": "zip",
+      "executable": "redis-server.exe",
+      "checksum_source": "https://github.com/redis-windows/redis-windows/releases/expanded_assets/7.4.8",
+      "note": "Community Cygwin build. Started in foreground with relative data/config paths, never as a Windows service."
+    }
   ],
-  "python_lockfiles": ["backend-web/requirements.lock", "websocket/requirements.lock", "scheduler/requirements.lock"],
-  "browser_installers": ["playwright install chromium", "patchright install chromium"],
-  "download_policy": "HTTPS, exact version and SHA256 mandatory; missing digest fails closed"
+  "python_lockfiles": [
+    "backend-web/requirements.lock",
+    "websocket/requirements.lock",
+    "scheduler/requirements.lock"
+  ],
+  "browser_installers": {
+    "method": "Verified HTTPS ZIP archives with pinned SHA256; revisions must match every installed Playwright/Patchright registry",
+    "sha256_verified_on": "2026-11-08",
+    "validation": "Launch both full Chromium and default headless browser in every service environment"
+  },
+  "download_policy": "HTTPS, exact version and SHA256 mandatory; verify before extraction and execution",
+  "installer": {
+    "name": "inno-setup",
+    "required": false,
+    "note": "Build only; install separately. No installer release is claimed by the native runtime."
+  },
+  "browsers": [
+    {
+      "name": "chromium",
+      "version": "1248",
+      "source": "https://cdn.playwright.dev/builds/cft/156.0.8078.4/win64/chrome-win64.zip",
+      "sha256": "220021ecfdad08c116fc71a153e65e3861ba841c531afc4f7acc7bd5d44b41db",
+      "executable": "chrome-win64/chrome.exe"
+    },
+    {
+      "name": "chromium-headless-shell",
+      "version": "1248",
+      "source": "https://cdn.playwright.dev/builds/cft/156.0.8078.4/win64/chrome-headless-shell-win64.zip",
+      "sha256": "5af4c82cf4b351ec4bad4c71dcf938af14fccea8a0eb0d5c2a7b49ccc922698c",
+      "executable": "chrome-headless-shell-win64/chrome-headless-shell.exe"
+    },
+    {
+      "name": "ffmpeg",
+      "version": "1013",
+      "source": "https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1013/ffmpeg-win64.zip",
+      "sha256": "0c4ee6c694e9bffea27128ab543ae573466c5245d7d16c054e40115d7d743874",
+      "executable": "ffmpeg-win64.exe"
+    },
+    {
+      "name": "winldd",
+      "version": "1007",
+      "source": "https://cdn.playwright.dev/dbazure/download/playwright/builds/winldd/1007/winldd-win64.zip",
+      "sha256": "0069f0d11d4ad6df068a068c003d22fe7dbec192a47bba64b2e115e9c8ce41d8",
+      "executable": "PrintDeps.exe"
+    }
+  ]
 }

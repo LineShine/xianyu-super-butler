@@ -4,6 +4,8 @@
 
 ## 启动
 
+Windows 双击 **启动鱼太咸.bat**，首次自动准备便携依赖并启动；双击 **停止鱼太咸.bat** 停止。重复启动不创建第二套进程，应用重启与命令行操作见 [Windows 本地运行](docs/WINDOWS.md)。
+
 macOS 双击 **启动鱼太咸.command**：未运行时直接启动，已运行时安全重启原生应用，保持本机数据库运行（首次升级管理器例外），无需先点击停止脚本。启动完成后会打开 <http://127.0.0.1:9999>。只需停止时，双击 **停止鱼太咸.command**。
 
 使用 Mac Docker 模式时，双击 **启动鱼太咸Docker.command** 即可：脚本会自动打开 Docker Desktop、等待引擎就绪，再启动共用的本机 MySQL、Redis 和应用容器，无需另外点击 Docker App 的 Start。双击 **停止鱼太咸Docker.command** 会完整停止当前实例的应用和本机数据库，保留数据、密钥、镜像，不退出 Docker Desktop，也不停止其他项目。Docker App 项目的 Start 按钮只启动容器，不能代替统一入口；本机数据库关闭时直接点击会导致后端连接失败。
@@ -27,7 +29,7 @@ bash dev.sh logs websocket
 
 迁移用户用原项目的账号密码重新登录。全新空库初始管理员为 `admin` / `admin123`，登录后在个人设置修改密码。
 
-Mac 原生与 Docker 应用共用当前本机 MySQL、Redis 和密钥。全新 Linux 使用 `bash docker.sh start` 完整容器模式。Windows 此次提供框架，见 [Windows AI 交接](launcher/windows/AI-HANDOFF.md)。
+Mac 原生与 Docker 应用共用当前本机 MySQL、Redis 和密钥。全新 Linux 使用 `bash docker.sh start` 完整容器模式。Windows 原生运行见 [Windows 本地运行说明](docs/WINDOWS.md)。
 
 ## 新安装的系统设置
 

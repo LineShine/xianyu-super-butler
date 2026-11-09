@@ -1,5 +1,7 @@
 # Windows AI 实现交接
 
+> 本文保留最初交接要求。Windows 源码运行实现及使用方式见 [Windows 本地运行](../../docs/WINDOWS.md)。EXE 打包仍是独立的后续工作。
+
 本目录是框架，不是已完成的 Windows 安装器，也未生成 EXE。Mac 与 Docker 的已实现逻辑位于 `scripts/deployment.py`、`scripts/docker_deploy.py`、`common/security/runtime.py`。不要直接在 Windows 导入依赖 fcntl/ps/killpg 的 Mac 启动器。
 
 在 Windows 实机完成以下工作：

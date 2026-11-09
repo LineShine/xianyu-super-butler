@@ -35,4 +35,5 @@ def restart_service(service_key: str) -> dict:
         temporary.replace(runtime / 'restart-request.json')
         return {'success': True, 'mode': 'native', 'message': '已提交重启请求，请稍后刷新服务状态'}
     except (OSError, ValueError, KeyError):
-        return {'success': False, 'mode': 'native', 'message': '请使用 bash dev.sh restart 重启服务'}
+        message = '请使用 Windows 启动器重启服务' if os.name == 'nt' else '请使用 bash dev.sh restart 重启服务'
+        return {'success': False, 'mode': 'native', 'message': message}

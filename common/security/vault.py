@@ -47,6 +47,10 @@ def read_keyring(path: Path | None = None) -> dict:
             raise ValueError("not a regular file")
         if os.name != "nt" and info.st_mode & 0o077:
             raise ValueError("key permissions")
+        if os.name == "nt":
+            from common.security.windows_acl import validate
+            validate(path)
+            validate(path.parent)
         data = json.loads(path.read_text(encoding="utf-8"))
         if data["version"] != 1 or len(_decode(data["keys"][data["active_key_id"]])) != 32:
             raise ValueError("invalid keyring")
@@ -68,6 +72,9 @@ def initialize_keyring(path: Path, instance_id: str) -> dict:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name != "nt":
         os.chmod(path.parent, 0o700)
+    else:
+        from common.security.windows_acl import protect
+        protect(path.parent)
     key_id = uuid.uuid4().hex
     data = {"version": 1, "instance_id": instance_id, "active_key_id": key_id,
             "keys": {key_id: _encode(secrets.token_bytes(32))}}
@@ -80,6 +87,8 @@ def initialize_keyring(path: Path, instance_id: str) -> dict:
             raise CredentialUnavailable("密钥与实例不匹配")
         return existing
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        if os.name == "nt":
+            protect(path)
         json.dump(data, handle)
         handle.flush()
         os.fsync(handle.fileno())

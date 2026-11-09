@@ -53,10 +53,19 @@ class VaultTests(unittest.TestCase):
         self.assertFalse(self.key.exists())
 
     def test_permissions_and_wrong_instance_rejected(self):
-        self.key.chmod(0o644)
+        if os.name == "nt":
+            import subprocess
+            subprocess.run(["icacls.exe", str(self.key), "/grant", "*S-1-1-0:(F)"],
+                           check=True, capture_output=True)
+        else:
+            self.key.chmod(0o644)
         with self.assertRaises(CredentialUnavailable):
             read_keyring()
-        self.key.chmod(0o600)
+        if os.name == "nt":
+            from common.security.windows_acl import protect
+            protect(self.key)
+        else:
+            self.key.chmod(0o600)
         with patch.dict(os.environ, {"YTX_INSTANCE_ID": "another"}):
             with self.assertRaises(CredentialUnavailable):
                 read_keyring()
