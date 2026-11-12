@@ -31,6 +31,9 @@ dependencies = [
     "bcrypt==5.0.0",
     "playwright",
     "Pillow>=10.0.0",
+    # Shared direct publishing loads video/media helpers from backend-web.
+    "opencv-python-headless>=4.10.0",
+    "pycryptodome>=3.19.0",
 ]
 
 [build-system]

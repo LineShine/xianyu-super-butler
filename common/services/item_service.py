@@ -27,6 +27,11 @@ from common.models.ytx_catalog_item import YtxCatalogItem
 from common.models.default_reply import DefaultReply
 from common.models.card import Card
 from common.services import code_generation_config
+from common.security.vault import CredentialUnavailable
+
+
+class ItemSyncCapabilityError(RuntimeError):
+    """No reliable account type: never replace seller metadata with a fallback."""
 
 
 class ItemService:
@@ -42,7 +47,7 @@ class ItemService:
 
         参照单品发布界面的能力检测（detect_publish_account_capability，优先调用鱼小铺卖家后台
         mtop.idle.pc.backend.idleitem.preget，不可用时回落个人版 mtop.idle.pc.idleitem.preget）
-        判定是否开通鱼小铺；检测失败/无法识别时回退个人版接口。
+        判定是否开通鱼小铺；仅接受可靠判定，失败时停止同步并保留已有商品。
 
         Args:
             account: 账号对象。
@@ -67,7 +72,7 @@ class ItemService:
         return ItemInfoManager(account.account_id, account.cookie)
 
     async def _detect_is_fish_shop(self, account: YtxAccount) -> bool:
-        """检测账号是否开通鱼小铺；检测失败或无法识别时回退为普通账号（False）。
+        """检测账号是否开通鱼小铺；失败或不可靠判定不能等价于普通账号。
 
         注意：检测过程中 mtop 可能因令牌过期而刷新 _m_h5_tk，但 mtop_call 仅在调用成功时
         才把新 Cookie 写回数据库。因此这里无论成败都要把 cookies_str 回填到 account，
@@ -81,22 +86,64 @@ class ItemService:
                 account_id=account.account_id,
                 owner_id=account.owner_id,
             )
+        except CredentialUnavailable:
+            raise
         except Exception as exc:
             logger.warning(
-                f"账号[{account.account_id}]鱼小铺检测异常，回退个人版接口获取商品: {exc}"
+                f"账号[{account.account_id}]商品能力检测异常，已停止同步并保留已有商品: {exc}"
             )
-            return False
+            raise ItemSyncCapabilityError(
+                f"账号商品能力检测异常（{type(exc).__name__}），本次未同步，已有商品保持不变"
+            ) from exc
+
+        if not isinstance(result, dict):
+            raise ItemSyncCapabilityError("账号商品能力检测未返回有效结果，本次未同步，已有商品保持不变")
 
         self._sync_account_cookie(account, result.get("cookies_str"))
 
-        if not result.get("success"):
+        if result.get("success") is not True:
             logger.warning(
-                f"账号[{account.account_id}]鱼小铺检测失败，回退个人版接口获取商品: "
+                f"账号[{account.account_id}]商品能力检测失败，已停止同步: "
                 f"{result.get('message') or '未知原因'}"
             )
-            return False
+            raise ItemSyncCapabilityError(
+                f"账号商品能力检测失败：{result.get('message') or '未知原因'}；本次未同步，已有商品保持不变"
+            )
 
-        return bool(result.get("is_fish_shop"))
+        if result.get("detection_reliable") is not True or not isinstance(result.get("is_fish_shop"), bool):
+            reason = result.get("detection_unreliable_reason") or "无法可靠识别账号类型"
+            logger.warning(f"账号[{account.account_id}]商品能力判定不可信，已停止同步: {reason}")
+            raise ItemSyncCapabilityError(
+                f"账号商品能力判定不可信：{reason}；本次未同步，已有商品保持不变"
+            )
+
+        return result["is_fish_shop"]
+
+    @staticmethod
+    def _parse_item_detail(raw: Any) -> dict:
+        """Accept both historical JSON strings and structured JSON snapshots."""
+        if isinstance(raw, dict):
+            return dict(raw)
+        if isinstance(raw, str) and raw:
+            try:
+                parsed = json.loads(raw)
+                return parsed if isinstance(parsed, dict) else {}
+            except (ValueError, TypeError):
+                pass
+        return {}
+
+    def _merge_fetched_detail(self, account: YtxAccount, previous: dict, incoming: dict) -> dict:
+        if previous.get("source") != "seller":
+            return dict(incoming)
+        if incoming.get("source") != "seller":
+            # Only a reliable ordinary-account result from this sync may change
+            # source. A partial card or direct caller without detection cannot.
+            if self._fish_shop_cache.get(account.account_id) is not False:
+                raise ItemSyncCapabilityError("抓取结果缺少卖家商品信息，已保留原商品，请重新同步")
+            return dict(incoming)
+        # Sparse seller snapshots must not erase fields they did not supply.
+        # Explicit values (including zero stock and an empty SKU list) win.
+        return {**previous, **incoming}
 
     @staticmethod
     def _sync_account_cookie(account: YtxAccount, latest_cookie: Optional[str]) -> None:
@@ -308,9 +355,11 @@ class ItemService:
         page_size: int = 20,
     ) -> dict[str, Any]:
         """从指定账号抓取单页商品并入库"""
-        myid = self._resolve_account_fetch_user_id(account)
-
-        manager = await self._resolve_item_fetch_manager(account)
+        try:
+            myid = self._resolve_account_fetch_user_id(account)
+            manager = await self._resolve_item_fetch_manager(account)
+        except (ItemSyncCapabilityError, CredentialUnavailable) as exc:
+            return {"success": False, "message": str(exc)}
         try:
             result = await manager.get_item_list_info(page, page_size, myid=myid)
         except Exception as exc:
@@ -429,10 +478,12 @@ class ItemService:
         required_title_keyword: str | None = None,
     ) -> dict[str, Any]:
         """抓取指定账号全部商品并入库（实际实现，调用方需已持有账号锁）"""
-        myid = self._resolve_account_fetch_user_id(account)
         normalized_required_title_keyword = str(required_title_keyword or "").strip()
-
-        manager = await self._resolve_item_fetch_manager(account)
+        try:
+            myid = self._resolve_account_fetch_user_id(account)
+            manager = await self._resolve_item_fetch_manager(account)
+        except (ItemSyncCapabilityError, CredentialUnavailable) as exc:
+            return {"success": False, "message": str(exc)}
         fetched_items: list[dict] = []
         total_saved_count = 0
         fetched_pages = 0
@@ -654,6 +705,9 @@ class ItemService:
             if has_changes:
                 await self.session.commit()
             return True, has_changes
+        except ItemSyncCapabilityError:
+            await self.session.rollback()
+            raise
         except IntegrityError:
             await self.session.rollback()
             logger.info(
@@ -664,6 +718,9 @@ class ItemService:
                 if has_changes:
                     await self.session.commit()
                 return True, has_changes
+            except ItemSyncCapabilityError:
+                await self.session.rollback()
+                raise
             except Exception as exc:
                 await self.session.rollback()
                 logger.warning(
@@ -703,8 +760,12 @@ class ItemService:
         )).scalars().first()
 
         if existing_item:
-            new_title = item.get("title", "")
-            new_price = item.get("price_text", "")
+            metadata_json = dict(existing_item.metadata_json or {})
+            merged_detail = self._merge_fetched_detail(
+                account, self._parse_item_detail(metadata_json.get("detail")), item
+            )
+            new_title = item.get("title", existing_item.title)
+            new_price = item.get("price_text", existing_item.price)
             changed = False
             if existing_item.title != new_title:
                 existing_item.title = new_title
@@ -712,14 +773,13 @@ class ItemService:
             if existing_item.price != new_price:
                 existing_item.price = new_price
                 changed = True
-            metadata_json = existing_item.metadata_json or {}
-            if metadata_json.get("category") != category:
+            if "category_id" in item and metadata_json.get("category") != category:
                 metadata_json["category"] = category
                 existing_item.metadata_json = metadata_json
                 flag_modified(existing_item, "metadata_json")
                 changed = True
-            # 刷新整块 detail：让库存、上架时间、状态等随每次同步更新，而非停留在首次抓取值
-            new_detail = json.dumps(item, ensure_ascii=False)
+            # 更新明确提供的卖家字段，避免弱快照清除库存、状态及编辑能力。
+            new_detail = json.dumps(merged_detail, ensure_ascii=False)
             if metadata_json.get("detail") != new_detail:
                 metadata_json["detail"] = new_detail
                 existing_item.metadata_json = metadata_json
@@ -867,14 +927,7 @@ class ItemService:
             return
 
         metadata = item.metadata_json or {}
-        detail: dict = {}
-        detail_raw = metadata.get("detail")
-        if isinstance(detail_raw, str) and detail_raw:
-            try:
-                parsed = json.loads(detail_raw)
-                detail = parsed if isinstance(parsed, dict) else {}
-            except (ValueError, TypeError):
-                detail = {}
+        detail = self._parse_item_detail(metadata.get("detail"))
 
         if single_payload:
             yuan = f"{float(single_payload['price']):.2f}"
@@ -1219,14 +1272,7 @@ class ItemService:
         metadata = item.metadata_json or {}
         # 从 detail(整块商品JSON) 解析鱼小铺特有字段供界面展示；普通账号无此字段时返回空
         detail_raw = metadata.get("detail")
-        detail_obj: dict = {}
-        if isinstance(detail_raw, str) and detail_raw:
-            try:
-                parsed = json.loads(detail_raw)
-                if isinstance(parsed, dict):
-                    detail_obj = parsed
-            except (ValueError, TypeError):
-                detail_obj = {}
+        detail_obj = self._parse_item_detail(detail_raw)
         return {
             "id": item.id,
             "cookie_id": account_id,
@@ -1234,7 +1280,7 @@ class ItemService:
             "title": item.title,
             "item_title": item.title,
             "item_description": metadata.get("description"),
-            "item_detail": detail_raw,
+            "item_detail": json.dumps(detail_raw, ensure_ascii=False) if isinstance(detail_raw, dict) else detail_raw,
             "item_category": metadata.get("category"),
             "item_price": item.price,
             # 鱼小铺特有：库存、上架时间、商品状态（普通账号为空，前端显示 -）

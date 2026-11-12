@@ -10,8 +10,13 @@ RUN python -m pip install --no-cache-dir -r /build/requirements.lock \
     && if python -c 'import patchright' 2>/dev/null; then python -m patchright install chromium; fi
 COPY common /app/common
 COPY ${SERVICE} /app/service
-COPY docker/container_entry.py docker/preflight.py /app/
+# Common publishing/capability helpers load backend-web modules by repository
+# path, including when the caller is scheduler or websocket. Keep that shared
+# source tree alongside (not in place of) the current service's app package.
+COPY backend-web/app /app/backend-web/app
+COPY docker/container_entry.py docker/preflight.py docker/verify_runtime_modules.py /app/
 ENV PYTHONPATH=/app/service:/app
+RUN python /app/verify_runtime_modules.py
 WORKDIR /app/data
 EXPOSE 8089 8090 8091
 ENTRYPOINT ["xvfb-run", "-a", "python", "/app/container_entry.py"]
