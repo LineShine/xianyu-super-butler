@@ -1,12 +1,14 @@
 """Private native MySQL/Redis instances, owned by the local supervisor."""
 from __future__ import annotations
 import hashlib
+import errno
 import json
 import os
 from pathlib import Path
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -156,6 +158,56 @@ class NativeInfrastructure:
             self.stop_one(process)
             self.metadata['mysql_initialized'] = True
             self.save()
+
+    def recover_redis(self, expected_pid):
+        """Finish an interrupted shutdown only after authenticating the old instance."""
+        def port_available():
+            with socket.socket() as probe:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    probe.bind(('127.0.0.1', port(self.config, 'redis')))
+                except OSError as exc:
+                    if exc.errno != errno.EADDRINUSE:
+                        raise
+                    return False
+            return True
+
+        if port_available():
+            return
+        env = credentials(self.config)
+        identity = {key: env[key] for key in ('MYSQL_DATABASE', 'MYSQL_USER', 'MYSQL_PASSWORD')}
+        identity_hash = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        if (type(expected_pid) is not int or expected_pid <= 1
+                or self.metadata.get('status') != 'ready'
+                or not self.metadata.get('redis_run_id')
+                or self.metadata.get('identity_hash') != identity_hash):
+            raise RuntimeError('残留 Redis 的管理记录或数据库配置不匹配，未停止任何进程。')
+
+        # Keep identity checks and SHUTDOWN on one authenticated connection.
+        # A disconnect must not retry the command against a replacement server.
+        from redis.backoff import NoBackoff
+        from redis.retry import Retry
+        try:
+            with redis_connection(self.config, retry=Retry(NoBackoff(), 0), retry_on_error=[]) as client:
+                info = client.info('server')
+                directory = client.config_get('dir').get('dir')
+                configuration = info.get('config_file')
+                if (info.get('process_id') != expected_pid
+                        or info.get('run_id') != self.metadata['redis_run_id']
+                        or not directory or Path(directory).resolve() != self.redis_dir.resolve()
+                        or not configuration or Path(configuration).resolve() != (self.directory / 'redis.conf').resolve()):
+                    raise RuntimeError('Redis 端口由其他进程或实例占用，未停止任何进程。')
+                print('发现本项目上次未退出的 Redis，正在保存数据并正常关闭后重新启动……', flush=True)
+                client.shutdown(save=True)
+        except redis.RedisError:
+            raise RuntimeError('无法确认残留 Redis 身份或安全保存并关闭，请查看 redis.log；未强制结束进程。') from None
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if port_available():
+                return
+            time.sleep(.1)
+        raise RuntimeError('本项目 Redis 仍未释放端口；未强制结束进程或启动新的数据库。')
 
     def start(self):
         self.initialize_mysql()

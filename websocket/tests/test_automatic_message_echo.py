@@ -1,24 +1,34 @@
 """Automatic echoes keep AI enabled; genuine manual messages still pause it."""
 import asyncio
+import json
 import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app.services.xianyu.auto_reply_service import AutoReplyService
-from app.services.xianyu.outgoing_message_tracker import OutgoingMessageTracker
+from app.services.xianyu.outgoing_message_tracker import (
+    OutgoingMessageTracker, incoming_message_identity, snapshot_matches_message,
+)
 from app.services.xianyu.xianyu_async import XianyuAsync
 
 
 class EchoTrackerTests(unittest.TestCase):
-    def test_command_window_five_seconds_does_not_change_other_echo_ttl(self):
-        tracker = OutgoingMessageTracker()
-        with patch('app.services.xianyu.outgoing_message_tracker.time.monotonic', return_value=10):
-            tracker.remember('seller', 'chat', '口令生成')
-            tracker.remember('seller', 'chat', '在的')
-        with patch('app.services.xianyu.outgoing_message_tracker.time.monotonic', return_value=15.01):
-            self.assertFalse(tracker.consume_echo('seller', 'chat', '口令生成', max_age_seconds=5))
-            self.assertTrue(tracker.consume_echo('seller', 'chat', '在的'))
+    def test_platform_identity_is_distinct_from_request_mid_and_uuid(self):
+        message = {'raw_message': {'1': {'3': 'platform-id', '4': 1}}}
+        self.assertEqual(incoming_message_identity(message), ('platform-id', None))
+        self.assertTrue(snapshot_matches_message([
+            {'mid': 'transport-id', 'uuid': 'client-id', 'ack': {'body': {'messageId': 'platform-id'}}},
+        ], message))
+        for snapshot in ({'mid': 'platform-id'}, {'uuid': 'platform-id'},
+                         {'ack': {'body': {'1': 'platform-id'}}}):
+            self.assertFalse(snapshot_matches_message(snapshot, message))
+        self.assertFalse(snapshot_matches_message({'messageId': 'fp:fingerprint'}, 'fp:fingerprint'))
+
+    def test_explicit_extension_id_and_nested_ack_id_are_supported(self):
+        message = {'raw_message': {'1': {'10': {'extJson': json.dumps({'messageId': 'platform-id'})}}}}
+        self.assertTrue(snapshot_matches_message({'ack': {'body': {'1': {'messageId': 'platform-id'}}}}, message))
+        self.assertFalse(snapshot_matches_message({'messageId': 'platform-id'}, {'raw_message': {'1': {}}}))
 
     def test_match_is_scoped_and_consumed_once(self):
         tracker = OutgoingMessageTracker()
@@ -67,6 +77,76 @@ class AutomaticEchoTests(unittest.IsolatedAsyncioTestCase):
     def message(self, text='在的', sender='TEST-SELLER'):
         return {'send_user_id': sender, 'chat_id': 'TEST-CHAT', 'send_message': text,
                 'raw_message': {'1': {'5': int(time.time() * 1000)}}}
+
+    def command(self, message_id='automatic-id', text='口令生成'):
+        message = self.message(text)
+        message['is_plain_text'] = True
+        message['raw_message']['1'].update({
+            '2': 'TEST-CHAT@goofish', '3': message_id,
+            '6': {'3': {'5': json.dumps({'contentType': 1, 'text': {'text': text}})}},
+            '10': {'senderUserId': 'TEST-SELLER', 'reminderContent': text},
+        })
+        return message
+
+    async def test_command_echo_before_send_returns_uses_ack_id_and_keeps_both_copies(self):
+        async def on_send(payload):
+            mid = json.loads(payload)['headers']['mid']
+            echoes = [asyncio.create_task(self.reply.handle_chat_message(self.command(), self.ws))
+                      for _ in range(2)]
+            await asyncio.sleep(0)
+            self.assertTrue(all(not task.done() for task in echoes))
+            self.client._dispatch_mid_response({'headers': {'mid': mid}, 'code': 200,
+                                               'body': {'messageId': 'automatic-id'}})
+            await asyncio.gather(*echoes)
+        self.ws.send.side_effect = on_send
+        result = await self.client.send_msg(self.ws, 'TEST-CHAT', 'TEST-BUYER', '口令生成')
+        self.assertTrue(result['success'])
+        self.reply._pause_ai_reply_after_manual_message.assert_not_awaited()
+        self.assertTrue(await self.tracker.matches_command_echo(
+            'TEST-SELLER', 'TEST-CHAT', '口令生成', self.command()))
+
+    async def test_distinct_manual_command_after_automatic_send_reaches_generator(self):
+        result = await self.client.send_msg(self.ws, 'TEST-CHAT', 'TEST-BUYER', '口令生成')
+        self.client._dispatch_mid_response({'headers': {'mid': result['mid']}, 'code': 200,
+                                           'body': {'messageId': 'automatic-id'}})
+        generator = SimpleNamespace(_is_recorded_automatic_echo=AsyncMock(return_value=False),
+                                    handle=AsyncMock(return_value=True))
+        with patch('app.services.xianyu.auto_reply_service.CodeGenerationService', return_value=generator), \
+             patch('app.services.xianyu.auto_reply_service.async_session_maker', return_value=AsyncMock()):
+            for text in ('口令生成', '生成口令'):
+                await self.reply.handle_chat_message(self.command('manual-' + text, text), self.ws)
+        self.assertEqual(generator.handle.await_count, 2)
+        self.assertEqual(self.reply._pause_ai_reply_after_manual_message.await_count, 2)
+
+    async def test_pending_ack_timeout_failure_and_cancellation_do_not_match_new_message(self):
+        for outcome in ('timeout', 'failed', 'cancelled'):
+            tracker = OutgoingMessageTracker()
+            future = asyncio.get_running_loop().create_future()
+            tracker.remember('TEST-SELLER', 'TEST-CHAT', '口令生成',
+                             request_mid='request-id', ack_future=future)
+            task = asyncio.create_task(tracker.matches_command_echo(
+                'TEST-SELLER', 'TEST-CHAT', '口令生成', self.command('manual-id'), wait_timeout=.01))
+            await asyncio.sleep(0)
+            if outcome == 'failed':
+                future.set_exception(ConnectionError('disconnected'))
+            elif outcome == 'cancelled':
+                future.cancel()
+            self.assertFalse(await task)
+            if outcome == 'timeout':
+                self.assertFalse(future.done())
+                future.cancel()
+
+    async def test_late_ack_is_bound_after_send_waiter_has_gone(self):
+        tracker = OutgoingMessageTracker()
+        tracker.remember('TEST-SELLER', 'TEST-CHAT', '口令生成', request_mid='request-id')
+        tracker.record_response('OTHER-SELLER', {'headers': {'mid': 'request-id'},
+                                               'body': {'messageId': 'automatic-id'}})
+        self.assertFalse(await tracker.matches_command_echo(
+            'TEST-SELLER', 'TEST-CHAT', '口令生成', self.command()))
+        tracker.record_response('TEST-SELLER', {'headers': {'mid': 'request-id'},
+                                              'body': {'messageId': 'automatic-id'}})
+        self.assertTrue(await tracker.matches_command_echo(
+            'TEST-SELLER', 'TEST-CHAT', '口令生成', self.command()))
 
     async def test_two_buyer_messages_with_automatic_echo_between_both_reply(self):
         self.reply._check_chat_processed = AsyncMock(return_value=False)

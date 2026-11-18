@@ -92,10 +92,18 @@ class InfrastructureStack(LocalStack):
         return {name: port for name, port in super().ports(config).items() if name in ("mysql", "redis")}
 
     def start(self, **kwargs):
-        if self.owned_supervisor(read_json(self.state_path)):
+        previous = read_json(self.state_path)
+        if self.owned_supervisor(previous):
             check_native(read_config(self.root))
             return
         config = read_config(self.root)
+        # A failed graceful stop can leave Redis alive after MySQL and the
+        # supervisor exit. Do not treat that verified instance as a foreign app,
+        # and never signal a process based on the persisted PID alone.
+        if previous.get('phase') == 'failed' and set(previous.get('children', {})) == {'redis'}:
+            self.preflight_ports({'services': {'mysql': config['services']['mysql']}}, {})
+            from native_infra import NativeInfrastructure
+            NativeInfrastructure(self, config).recover_redis(previous['children']['redis'])
         self.preflight_ports(config, {})
         state = {"token": secrets.token_hex(16), "phase": "starting", "children": {}, "error": ""}
         write_json(self.state_path, state)

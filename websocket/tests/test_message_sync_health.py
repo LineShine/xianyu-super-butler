@@ -10,10 +10,10 @@ from app.services.xianyu.connection_manager import ConnectionState
 from app.services.xianyu.message_handler import MessageHandler
 
 
-def history(mid='new', stamp=2000, sender='2001'):
+def history(mid='new', stamp=2000, sender='2001', text='口令'):
     return {'userMessageModels': [{'message': {
         'messageId': mid, 'createAt': stamp, 'extension': {'senderUserId': sender},
-        'content': {'custom': {'data': json.dumps({'contentType': 1, 'text': {'text': '口令'}})}}}}]}
+        'content': {'custom': {'data': json.dumps({'contentType': 1, 'text': {'text': text}})}}}}]}
 
 
 def listing(mid='old', stamp=1000):
@@ -152,6 +152,46 @@ class HealthTests(unittest.IsolatedAsyncioTestCase):
         self.now += 61
         await self.health.poll(self.instance._registered_ws)
         self.assertTrue(self.health.gap_detected)
+
+    async def test_missing_seller_command_is_not_hidden_by_working_buyer_direction(self):
+        await self.baseline()
+        command = history(sender='1001', text='口令生成')
+        self.health.check_history('4001', command)
+        self.now += 61
+        self.health.check_history('4001', command)
+        self.assertTrue(self.health.gap_detected)
+        self.assertEqual(self.health.failure_directions, {'seller'})
+        await self.health.recover()
+        self.health.observe(push('buyer-still-works', 3000))
+        self.assertEqual(self.health.recovery_attempts, 1)
+        self.health.observe(push('seller-recovered', 4000, sender='1001'))
+        self.assertEqual(self.health.recovery_attempts, 0)
+        self.assertFalse(self.health.failure_directions)
+
+    async def test_observed_seller_command_and_automatic_metadata_do_not_trigger_recovery(self):
+        await self.baseline()
+        self.health.observe(push(sender='1001'))
+        self.health.check_history('4001', history(sender='1001', text='口令生成'))
+        self.assertFalse(self.health.pending)
+        for flag in ('isAutoReply', 'automatic'):
+            automatic = history(mid='automatic', sender='1001', text='口令生成')
+            automatic['userMessageModels'][0]['message']['extension'][flag] = True
+            self.health.check_history('4001', automatic)
+            self.assertFalse(self.health.pending)
+
+    async def test_both_directions_must_recover_when_both_were_missing(self):
+        await self.baseline()
+        commands = history(sender='1001', text='生成口令')
+        commands['userMessageModels'] += history(mid='buyer')['userMessageModels']
+        self.health.check_history('4001', commands)
+        self.now += 61
+        self.health.check_history('4001', commands)
+        await self.health.recover()
+        self.health.observe(push('fresh-buyer', 3000))
+        self.assertEqual(self.health.failure_directions, {'seller'})
+        self.assertEqual(self.health.recovery_attempts, 1)
+        self.health.observe(push('fresh-seller', 4000, sender='1001'))
+        self.assertEqual(self.health.recovery_attempts, 0)
 
     async def test_recovery_waits_for_new_evidence_idle_is_not_failure(self):
         await self.baseline()

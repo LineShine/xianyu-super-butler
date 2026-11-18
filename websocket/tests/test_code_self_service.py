@@ -109,9 +109,24 @@ class EntitlementTests(unittest.TestCase):
 
 
 class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
-    make_instance = base_tests.CommandTests.make_instance
     records = base_tests.CommandTests.records
     modify_item = base_tests.CommandTests.modify_item
+
+    def make_instance(self, account):
+        instance = base_tests.CommandTests.make_instance(self, account)
+        sequence = 0
+
+        async def send(ws, chat, buyer, text):
+            nonlocal sequence
+            sequence += 1
+            mid = f'request-{account}-{sequence}'
+            future = asyncio.get_running_loop().create_future()
+            future.set_result({'code': 200, 'body': {'messageId': f'sent-{account}-{sequence}'}})
+            instance._pending_mid_futures[mid] = future
+            return {'success': True, 'mid': mid, 'uuid': f'uuid-{account}-{sequence}', 'send_future': future}
+
+        instance.send_msg = AsyncMock(side_effect=send)
+        return instance
 
     def setUp(self):
         base_tests.CommandTests.setUp(self)
@@ -144,6 +159,36 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
     def sent(self, instance=None):
         return [call.args[3] for call in (instance or self.instance).send_msg.await_args_list]
 
+    def marker_message_id(self):
+        for log in reversed(self.records()):
+            for text, result in zip(log.reply_segments or [], log.send_result_json or []):
+                if text == self_service.GENERATING:
+                    return result['ack']['body']['messageId']
+        self.fail('Expected a confirmed automatic marker in the persisted reply log')
+
+    def buyer_state(self):
+        return (
+            [(row.id, row.state, row.cooldown_until_ms, row.expires_ms, row.active_attempt_id)
+             for row in self.flows()],
+            [(row.id, row.quota_state, row.quota_day, row.quota_used, row.finished_ms)
+             for row in self.attempts()],
+        )
+
+    async def assert_seller_commands_leave_buyer_state_unchanged(self):
+        before = self.buyer_state()
+        runs, sent, order_checks = self.runner.await_count, len(self.sent()), self.api.await_count
+        reply = AutoReplyService('1001', self.instance)
+        reply._record_auto_reply_log = AsyncMock()
+        reply._pause_ai_reply_after_manual_message = AsyncMock(return_value=True)
+        for command in ('口令生成', '生成口令'):
+            for _ in range(4):
+                await reply.handle_chat_message(self.event(command, buyer='1001'), self.ws)
+        self.assertEqual(self.runner.await_count, runs + 8)
+        self.assertEqual(self.sent()[sent:], ['aB09zZ'] * 8)
+        self.assertEqual(self.api.await_count, order_checks)
+        self.assertEqual(self.buyer_state(), before)
+        self.assertEqual(reply._pause_ai_reply_after_manual_message.await_count, 8)
+
     async def begin(self, **kwargs):
         self.clock += 1
         self.assertTrue(await self.auto.handle(self.event(**kwargs), self.ws))
@@ -172,7 +217,7 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_success_has_exact_ordered_messages_and_persisted_quota(self):
         await self.cycle()
-        self.assertEqual(self.sent(), [self_service.PROMPT, self_service.PROCESSING, '口令生成', 'aB09zZ'])
+        self.assertEqual(self.sent(), [self_service.PROMPT, self_service.PROCESSING, self_service.GENERATING, 'aB09zZ'])
         self.assertEqual(self.runner.await_count, 1)
         self.api.assert_awaited_once_with(cookies='test-only', seller_id='1001', buyer_id='2001', item_id='3001', order_no=ORDER)
         record = next(a for a in self.attempts() if a.order_no)
@@ -232,7 +277,7 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(a.quota_state == 'none' for a in self.attempts()))
         sold['data']['module']['items'][0]['priceVO']['refundFee'] = '0.00'
         await self.submit(order)
-        self.assertEqual(self.sent()[-3:], [self_service.PROCESSING, '口令生成', 'aB09zZ'])
+        self.assertEqual(self.sent()[-3:], [self_service.PROCESSING, self_service.GENERATING, 'aB09zZ'])
         self.runner.assert_awaited_once()
         self.assertEqual(sum(a.quota_state == 'success' for a in self.attempts()), 1)
 
@@ -257,7 +302,7 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
                 original = prefix + order + suffix
                 await self.begin(chat=chat)
                 event = await self.submit(original, chat=chat)
-                self.assertEqual(self.sent()[-3:], [self_service.PROCESSING, '口令生成', 'aB09zZ'])
+                self.assertEqual(self.sent()[-3:], [self_service.PROCESSING, self_service.GENERATING, 'aB09zZ'])
                 self.assertEqual(self.api.await_args.kwargs['order_no'], order)
                 attempt = next(a for a in self.attempts() if a.order_no == order)
                 self.assertEqual((attempt.quota_state, attempt.quota_used), ('success', 1))
@@ -397,7 +442,7 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
                 reply = AutoReplyService('1001', self.instance)
                 reply._record_auto_reply_log = AsyncMock()
                 reply._pause_ai_reply_after_manual_message = AsyncMock()
-                echo = message(mid=f'echo-{offset}', text='口令生成', timestamp=platform_time)
+                echo = message(mid=self.marker_message_id(), text='口令生成', timestamp=platform_time)
                 await reply.handle_chat_message(echo, self.ws)
                 reply._pause_ai_reply_after_manual_message.assert_not_awaited()
             self.clock += self_service.WINDOW_MS + 1
@@ -484,13 +529,62 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.submit()
         self.assertEqual(self.runner.await_count, 2)
 
-    async def test_automatic_marker_window_is_five_seconds(self):
+    async def test_seller_commands_ignore_waiting_buyer_flow_without_changing_it(self):
+        await self.begin()
+        self.assertEqual(self.flows()[0].state, 'waiting')
+        await self.assert_seller_commands_leave_buyer_state_unchanged()
+        await self.submit()
+        self.assertEqual(self.runner.await_count, 9)
+        self.assertEqual(sum(a.quota_state == 'success' for a in self.attempts()), 1)
+
+    async def test_seller_commands_ignore_buyer_success_cooldown_without_consuming_quota(self):
         await self.cycle()
+        finished = self.clock
+        for delay in (1000, 5000, 30000, 179000):
+            with self.subTest(delay_ms=delay):
+                self.clock = finished + delay
+                self.assertLess(self.clock, self.flows()[0].cooldown_until_ms)
+                await self.assert_seller_commands_leave_buyer_state_unchanged()
+        await self.begin()
+        self.assertEqual(self.records()[-1].decision_reason, 'code_keyword_cooldown')
+        self.assertEqual(sum(a.quota_state == 'success' for a in self.attempts()), 1)
+
+    async def test_seller_commands_ignore_exhausted_buyer_daily_quota(self):
+        for _ in range(3):
+            await self.cycle()
+            self.clock += self_service.COOLDOWN_MS + 1
+        await self.cycle()
+        self.assertEqual(self.sent()[-1], self_service.LIMIT_HINT)
+        self.assertEqual(sum(a.quota_state == 'success' for a in self.attempts()), 3)
+        await self.assert_seller_commands_leave_buyer_state_unchanged()
+
+    async def test_automatic_marker_echo_matches_confirmed_message_id_not_time_window(self):
+        await self.cycle()
+        marker_id = self.marker_message_id()
         marker_time = next(a.marker_at_ms for a in self.attempts() if a.marker_at_ms)
-        for delay, expected_runs in [(5000, 1), (5001, 2)]:
-            self.clock = marker_time + delay
-            await self.service.handle(message(mid=f'manual-{delay}', text='口令生成', timestamp=self.clock), self.ws)
-            self.assertEqual(self.runner.await_count, expected_runs)
+        # First delivery is well beyond the former five-second window; subsequent
+        # native/Web repeats must remain suppressed with the same confirmed ID.
+        for delay in (179000, 5001, 5000, 1000):
+            with self.subTest(delay_ms=delay):
+                self.clock = marker_time + delay
+                runs = self.runner.await_count
+                await self.service.handle(message(mid=marker_id, text='口令生成', timestamp=self.clock), self.ws)
+                self.assertEqual(self.runner.await_count, runs)
+                await self.service.handle(message(mid=f'manual-{delay}', text='口令生成', timestamp=self.clock), self.ws)
+                self.assertEqual(self.runner.await_count, runs + 1)
+
+    async def test_generation_status_echo_never_runs_script_even_without_matching_send_id(self):
+        await self.cycle()
+        sent = self.sent()
+        reply = AutoReplyService('1001', self.instance)
+        reply._record_auto_reply_log = AsyncMock()
+        reply._pause_ai_reply_after_manual_message = AsyncMock(return_value=True)
+        for mid in (self.marker_message_id(), 'unconfirmed-status-message'):
+            event = message(mid=mid, text=self_service.GENERATING, timestamp=self.clock)
+            self.assertFalse(await self.service.handle(event, self.ws))
+            await reply.handle_chat_message(event, self.ws)
+        self.runner.assert_awaited_once()
+        self.assertEqual(self.sent(), sent)
 
     async def test_order_cooldown_across_chats_and_midnight_uses_beijing_day(self):
         self.clock = int(datetime.fromisoformat('2026-10-26T23:59:59+08:00').timestamp() * 1000)
@@ -604,7 +698,7 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(next(a for a in self.attempts() if a.order_no).quota_day, '2026-10-27')
 
     async def test_prompt_processing_and_marker_unknown_stop_pipeline(self):
-        for target in (self_service.PROMPT, self_service.PROCESSING, '口令生成'):
+        for target in (self_service.PROMPT, self_service.PROCESSING, self_service.GENERATING):
             self.instance = self.make_instance('1001')
             self.auto = self_service.CodeSelfService('1001', self.instance)
             self.send_behavior(target, 'unknown')
@@ -661,7 +755,7 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         reply = AutoReplyService('1001', self.instance)
         reply._record_auto_reply_log = AsyncMock()
         reply._pause_ai_reply_after_manual_message = AsyncMock()
-        marker = message(mid='marker-echo', text='口令生成', timestamp=self.clock)
+        marker = message(mid=self.marker_message_id(), text='口令生成', timestamp=self.clock)
         await reply.handle_chat_message(marker, self.ws)
         reply._pause_ai_reply_after_manual_message.assert_not_awaited()
         self.runner.assert_awaited_once()
@@ -681,4 +775,4 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         reply._record_auto_reply_log.assert_not_awaited()
         self.runner.assert_awaited_once()
         self.assertEqual(self.sent(), [self_service.PROMPT, self_service.FORMAT_HINT,
-                                      self_service.FORMAT_HINT, self_service.PROCESSING, '口令生成', 'aB09zZ'])
+                                      self_service.FORMAT_HINT, self_service.PROCESSING, self_service.GENERATING, 'aB09zZ'])

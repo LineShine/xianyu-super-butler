@@ -9,7 +9,7 @@ import re
 import sys
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from weakref import WeakValueDictionary
@@ -25,6 +25,7 @@ from common.models.ytx_catalog_item import YtxCatalogItem
 from common.models.ytx_order import YtxOrder
 from common.services import code_generation_config as config
 from app.services.xianyu import code_timing
+from app.services.xianyu.outgoing_message_tracker import snapshot_matches_message
 from common.utils.xianyu_message_parser import decode_first_content, interpret_content
 
 SCRIPT_PATH = Path(__file__).resolve().parents[4] / "common/custom_func/generate_code.py"
@@ -338,7 +339,7 @@ class CodeGenerationService:
                     raise CommandStopped("code_stale", "商品缺少有效的口令开启版本")
                 since = items[0].metadata_json[config.ENABLED_AT_KEY]
                 record.item_title = items[0].title
-                record.context_snapshot = {"buyer_id": buyer_id, "item_id": item_id, "enabled_at": since,
+                record.context_snapshot = {"entry_source": "seller_manual", "buyer_id": buyer_id, "item_id": item_id, "enabled_at": since,
                                            "source_timestamp_ms": timestamp, "received_local_ms": received.local_ms, "claim": "at_most_once"}
                 target = (buyer_id, item_id, since)
             except CommandStopped as exc:
@@ -397,30 +398,23 @@ class CodeGenerationService:
         return items.pop(), buyers.pop()
 
     async def _is_recorded_automatic_echo(self, session, message, timestamp) -> bool:
-        # On restart the in-memory echo tracker is empty. Persisted outgoing reply logs
-        # conservatively exclude command-shaped automatic replies near their original send time.
-        from common.models.code_self_service import CodeSelfServiceAttempt
-        # Persist the visible automatic command before dispatch, so even a process crash
-        # cannot turn its echo into a new manual command.
-        automatic = (await session.execute(select(CodeSelfServiceAttempt.id).where(
-            CodeSelfServiceAttempt.account_pk == select(YtxAccount.id).where(
-                YtxAccount.account_id == self.account_id).scalar_subquery(),
-            CodeSelfServiceAttempt.chat_id == normalize_id(message["chat_id"]),
-            CodeSelfServiceAttempt.marker_at_ms.between(
-                timestamp - config.AUTOMATIC_ECHO_WINDOW_MS, timestamp + config.AUTOMATIC_ECHO_WINDOW_MS),
-        ).limit(1))).first()
-        if automatic:
-            return True
-        sent_at = datetime.fromtimestamp(code_timing.receipt(message).local_ms / 1000)
-        row = (await session.execute(select(ReplyLog.id).where(
+        # After restart, compare the platform message ID with persisted send ACKs.
+        # A nearby send (even with identical text) is not evidence of an echo:
+        # the seller can issue a fresh command while buyer self-service is cooling down.
+        query = select(ReplyLog.id, ReplyLog.send_result_json).where(
             ReplyLog.account_id == self.account_id,
             ReplyLog.chat_id == normalize_id(message["chat_id"]),
-            ReplyLog.reply_strategy.notin_(["code_generation", "none"]),
-            ReplyLog.reply_text == message["send_message"],
-            ReplyLog.created_at.between(sent_at - timedelta(milliseconds=config.AUTOMATIC_ECHO_WINDOW_MS),
-                                       sent_at + timedelta(milliseconds=config.AUTOMATIC_ECHO_WINDOW_MS)),
-        ).limit(1))).first()
-        return row is not None
+            ReplyLog.send_result_json.is_not(None),
+        )
+        before_id = None
+        while True:
+            page = query if before_id is None else query.where(ReplyLog.id < before_id)
+            rows = (await session.execute(page.order_by(ReplyLog.id.desc()).limit(100))).all()
+            if any(snapshot_matches_message(snapshot, message) for _, snapshot in rows):
+                return True
+            if len(rows) < 100:
+                return False
+            before_id = rows[-1][0]
 
     async def _recheck(self, claim: Claim) -> None:
         async with async_session_maker() as session:

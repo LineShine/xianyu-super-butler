@@ -357,7 +357,9 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_automatic_command_echo_never_pauses_or_runs(self):
         tracker = OutgoingMessageTracker()
-        tracker.remember('1001', '4001', '生成口令')
+        tracker.remember('1001', '4001', '生成口令', request_mid='request-1')
+        tracker.record_response('1001', {'headers': {'mid': 'request-1'},
+                                       'body': {'messageId': '5001'}})
         reply = AutoReplyService('1001', self.instance)
         reply._record_auto_reply_log = AsyncMock()
         reply._pause_ai_reply_after_manual_message = AsyncMock()
@@ -370,9 +372,47 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         with Session(self.engine) as db:
             db.add(ReplyLog(id=20, owner_id=1, account_pk=1, account_id='1001', chat_id='4001',
                 sender_user_id='2001', reply_strategy='ai', reply_text='生成口令', process_status='success',
+                send_result_json=[{'ack': {'body': {'messageId': '5001'}}}],
                 created_at=datetime.now()))
             db.commit()
         await self.service.handle(message(), self.ws)
+        self.runner.assert_not_awaited()
+        self.assertEqual(self.records()[0].decision_reason, 'automatic_message_echo')
+
+    async def test_new_manual_ids_do_not_match_nearby_automatic_reply_or_request_uuid(self):
+        with Session(self.engine) as db:
+            db.add(ReplyLog(id=20, owner_id=1, account_pk=1, account_id='1001', chat_id='4001',
+                sender_user_id='2001', reply_strategy='ai', reply_text='生成口令', process_status='success',
+                send_result_json=[{'mid': '5001', 'uuid': '5001',
+                                  'ack': {'body': {'messageId': 'automatic-id'}}}],
+                created_at=datetime.now()))
+            db.commit()
+        for mid, text in [('5001', '生成口令'), ('5002', '口令生成')]:
+            await self.service.handle(message(mid=mid, text=text), self.ws)
+        self.assertEqual(self.runner.await_count, 2)
+        self.assertTrue(all(record.decision_reason == 'code_sent' for record in self.records()))
+        self.assertTrue(all(record.context_snapshot['entry_source'] == 'seller_manual'
+                            for record in self.records()))
+
+    async def test_persisted_automatic_message_id_is_scoped_to_account_and_chat(self):
+        with Session(self.engine) as db:
+            for index, account, chat in [(20, '1002', '4001'), (21, '1001', '4002')]:
+                db.add(ReplyLog(id=index, owner_id=1, account_pk=1, account_id=account, chat_id=chat,
+                    sender_user_id='2001', reply_strategy='ai', process_status='success',
+                    send_result_json={'ack': {'body': {'messageId': '5001'}}}))
+            db.commit()
+        await self.service.handle(message(), self.ws)
+        self.runner.assert_awaited_once()
+
+    async def test_delayed_automatic_echo_still_matches_after_many_newer_sends(self):
+        with Session(self.engine) as db:
+            for index in range(20, 125):
+                db.add(ReplyLog(id=index, owner_id=1, account_pk=1, account_id='1001', chat_id='4001',
+                    sender_user_id='2001', reply_strategy='ai', process_status='success',
+                    send_result_json={'ack': {'body': {'messageId': f'auto-{index}'}}}))
+            db.commit()
+        self.counter = 125
+        await self.service.handle(message(mid='auto-20'), self.ws)
         self.runner.assert_not_awaited()
         self.assertEqual(self.records()[0].decision_reason, 'automatic_message_echo')
 

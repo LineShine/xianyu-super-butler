@@ -325,10 +325,14 @@ export function Items() {
   const handleDelete = async (item: Item) => {
     setDeleting(true)
     try {
-      await deleteItem(item.cookie_id, item.item_id)
+      const result = await deleteItem(item.cookie_id, item.item_id, item.id)
+      if (!result.success) {
+        addToast({ type: 'error', message: result.message || '删除失败' })
+        return
+      }
       addToast({ type: 'success', message: '删除成功' })
       setDeleteItemConfirm({ open: false, item: null })
-      loadItems()
+      await loadItems()
     } catch {
       addToast({ type: 'error', message: '删除失败' })
     } finally {
@@ -364,10 +368,10 @@ export function Items() {
     }
     setDeleting(true)
     try {
-      // 将选中的 ID 转换为 { cookie_id, item_id } 格式
+      // 回传目录行主键，区分同一商品在有效账号和历史账号下的记录
       const itemsToDelete = items
         .filter((item) => selectedIds.has(item.id))
-        .map((item) => ({ cookie_id: item.cookie_id, item_id: item.item_id }))
+        .map((item) => ({ cookie_id: item.cookie_id, item_id: item.item_id, catalog_id: item.id }))
       const result = await batchDeleteItems(itemsToDelete)
       if (result.success) {
         addToast({ type: 'success', message: result.message || `成功删除 ${selectedIds.size} 个商品` })

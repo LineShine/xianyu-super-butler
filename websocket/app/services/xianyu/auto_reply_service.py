@@ -642,13 +642,15 @@ class AutoReplyService:
                 raw_message = parsed_message.get("raw_message") or {}
                 message_body = raw_message.get("1", {}) if isinstance(raw_message, dict) else {}
                 timestamp_ms = message_body.get("5") if isinstance(message_body, dict) else None
-                from common.services.code_generation_config import AUTOMATIC_ECHO_WINDOW_MS
                 seller_command = is_seller_command(parsed_message, myid)
-                if outgoing_message_tracker.consume_echo(
-                    self.cookie_id, chat_id, send_message,
-                    None if seller_command else timestamp_ms,
-                    max_age_seconds=AUTOMATIC_ECHO_WINDOW_MS / 1000 if seller_command else None,
-                ):
+                automatic_echo = (
+                    await outgoing_message_tracker.matches_command_echo(
+                        self.cookie_id, chat_id, send_message, parsed_message,
+                    ) if seller_command else outgoing_message_tracker.consume_echo(
+                        self.cookie_id, chat_id, send_message, timestamp_ms,
+                    )
+                )
+                if automatic_echo:
                     log_payload["process_status"] = "skipped"
                     log_payload["decision_reason"] = "automatic_message_echo"
                     logger.info(f"【{self.cookie_id}】自动消息回传，保持自动回复启用: chat_id={chat_id}")

@@ -2038,11 +2038,13 @@ class XianyuAsync:
             return None
     
     async def _send_with_echo_tracking(self, websocket, payload: str, chat_id: str,
-                                       content: str, *, automatic: bool = True):
+                                       content: str, *, automatic: bool = True,
+                                       request_mid=None, ack_future=None):
         # Register before yielding to send(): the other IM connection may receive
         # the echo before this coroutine resumes. Failed writes must not suppress
         # a later manual message with the same text.
-        token = (outgoing_message_tracker.remember(self.cookie_id, chat_id, content)
+        token = (outgoing_message_tracker.remember(self.cookie_id, chat_id, content,
+                                                   request_mid=request_mid, ack_future=ack_future)
                  if automatic else None)
         try:
             await websocket.send(payload)
@@ -2120,7 +2122,8 @@ class XianyuAsync:
 
             dispatch_started = True
             await self._send_with_echo_tracking(
-                websocket, msg_str, chat_id, content, automatic=automatic
+                websocket, msg_str, chat_id, content, automatic=automatic,
+                request_mid=registered_mid, ack_future=send_future,
             )
             logger.info(f"【{self.cookie_id}】文本消息已写入连接: mid={mid}, uuid={message_uuid}")
             return {
@@ -2272,6 +2275,7 @@ class XianyuAsync:
         try:
             if not isinstance(message_data, dict):
                 return False
+            outgoing_message_tracker.record_response(self.cookie_id, message_data)
             headers = message_data.get("headers") or {}
             mid = headers.get("mid") if isinstance(headers, dict) else None
             if not mid or mid not in self._pending_mid_futures:

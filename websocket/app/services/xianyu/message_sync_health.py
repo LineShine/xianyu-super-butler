@@ -1,4 +1,4 @@
-"""Read-only checks for a registered socket that silently misses buyer messages.
+"""Read-only checks for a socket missing buyer messages or seller commands.
 
 History is evidence only: never dispatch it to automation or mark messages read.
 Use server message timestamps for the startup boundary, monotonic time for grace.
@@ -14,6 +14,7 @@ from loguru import logger
 
 from common.utils.xianyu_message_parser import load_content_json, interpret_content
 from common.utils.xianyu_utils import generate_mid
+from common.services.code_generation_config import COMMANDS
 
 OFFLINE_REASON = '消息接收异常，自动回复和实时发货可能失效，请重新扫码登录此账号'
 INTERVAL = 30
@@ -34,6 +35,7 @@ class MessageSyncHealth:
         self.instance = instance
         self.unhealthy = False
         self.failure_timestamp = 0
+        self.failure_directions = set()
         self.boundary = None
         self.seen = OrderedDict()
         self.conversations = OrderedDict()
@@ -56,7 +58,7 @@ class MessageSyncHealth:
         body = object_value(raw.get('1'))
         info = object_value(body.get('10'))
         sender = str(info.get('senderUserId') or '').split('@')[0]
-        if not sender.isdigit() or sender in ('0', str(self.instance.myid)):
+        if not sender.isdigit() or sender == '0':
             return
         cid, mid = str(body.get('2') or '').split('@')[0], str(body.get('3') or '')
         if not cid or not mid:
@@ -71,9 +73,14 @@ class MessageSyncHealth:
             stamp = int(body.get('5') or 0)
         except (ValueError, TypeError):
             return
-        if (self.unhealthy or self.recovery_attempts) and stamp > self.failure_timestamp:
+        direction = 'seller' if sender == str(self.instance.myid) else 'buyer'
+        if ((self.unhealthy or self.recovery_attempts) and stamp > self.failure_timestamp
+                and (not self.failure_directions or direction in self.failure_directions)):
+            self.failure_directions.discard(direction)
+            if self.failure_directions:
+                return
             self.unhealthy = False
-            self.events.append(('success', f'自动重连 {self.recovery_attempts} 次后已确认收到新的买家消息'))
+            self.events.append(('success', f'自动重连 {self.recovery_attempts} 次后已确认收到新的聊天消息'))
             self.recovery_attempts = 0
             self.gap_detected = False
             self.pending.clear()
@@ -127,15 +134,20 @@ class MessageSyncHealth:
                 stamp = int(msg.get('createAt') or msg.get('time') or 0)
             except (ValueError, TypeError):
                 continue
-            if not mid or not sender.isdigit() or sender in ('0', str(self.instance.myid)):
+            if not mid or not sender.isdigit() or sender == '0':
                 continue
-            # Only actual buyer text/images, not status cards, tips or previews.
+            # Seller commands also require cross-device delivery. History remains
+            # evidence only; it must never execute or replay a command.
             custom = object_value(object_value(msg.get('content')).get('custom'))
             decoded = load_content_json(custom.get('data'))
             biz = object_value(ext.get('extJson'))
             if (not decoded or interpret_content(decoded)[2] not in ('text', 'image')
-                    or biz.get('msgArg1') == 'MsgTips' or ext.get('isAutoReply')
+                    or biz.get('msgArg1') == 'MsgTips' or ext.get('isAutoReply') or ext.get('automatic')
                     or stamp <= (self.boundary or 0)):
+                continue
+            direction = 'seller' if sender == str(self.instance.myid) else 'buyer'
+            if direction == 'seller' and (decoded.get('contentType') != 1
+                    or interpret_content(decoded)[0] not in COMMANDS):
                 continue
             key = (cid, mid)
             confirmed.add(key)
@@ -146,7 +158,8 @@ class MessageSyncHealth:
             self.pending[key] = (first, count + 1, stamp)
             if count >= 1 and now - first >= GRACE and not self.unhealthy:
                 self.gap_detected = True
-                self.failure_timestamp = stamp
+                self.failure_timestamp = max(self.failure_timestamp, stamp)
+                self.failure_directions.add(direction)
                 logger.warning(f'【{self.instance.cookie_id}】消息接收异常: chat_id={cid}, '
                                f'message_id={mid}, 多次查询确认新消息未进入实时处理')
         # Recalled/removed messages no longer prove missing delivery.
@@ -195,7 +208,7 @@ class MessageSyncHealth:
                 db.add(YtxRiskControlLog(
                     owner_id=account.owner_id, account_pk=account.id,
                     account_identifier=self.instance.cookie_id, event_type='message_sync',
-                    event_description='消息接收异常：聊天记录存在新买家消息，但实时消息链路未收到',
+                    event_description='消息接收异常：聊天记录存在新买家消息或卖家口令指令，但实时消息链路未收到',
                     processing_status=status, processing_result=result,
                     error_message=result if status == 'failed' else None, call_type='local'))
                 await db.commit()
@@ -216,10 +229,10 @@ class MessageSyncHealth:
             except Exception:
                 ok = False
             if self.recovery_attempts == 0:
-                return  # A fresh buyer push already verified recovery while reconnecting.
+                return  # A fresh push already verified recovery while reconnecting.
             self.events.append(('success' if ok else 'failed',
                 f'第 {attempt}/2 次自动重连：' +
-                ('连接已恢复，等待新买家消息验证接收' if ok else '连接恢复失败')))
+                ('连接已恢复，等待对应方向的新消息验证接收' if ok else '连接恢复失败')))
             if ok:
                 # Reconnection need not replay old messages. Only new misses may
                 # fail this attempt; an idle account remains pending verification.

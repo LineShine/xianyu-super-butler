@@ -20,6 +20,7 @@ from common.schemas.item import (
     ItemFullFetchRequest,
     ItemPageFetchRequest,
     ItemCodeGenerationUpdate,
+    ItemTarget,
     SellerItemEditRequest,
 )
 from common.services.item_offline_service import batch_offline_items_from_xianyu
@@ -965,14 +966,13 @@ async def update_item_multi_quantity_delivery(
     return ApiResponse(success=True, message=f"商品多数量发货状态已{status_text}")
 
 
-class ItemDeleteRequest(PydanticBaseModel):
+class ItemDeleteRequest(ItemTarget):
     """统一删除商品请求（账号可选）
 
     - cookie_id 传入：按账号删除（校验归属）；
-    - cookie_id 不传：商品所属账号仍存在则要求指定账号，账号已删除（孤儿商品）则直接按商品ID删除。
+    - cookie_id 不传：仅删除指定的孤儿记录，保留同商品仍关联账号的记录。
+    - catalog_id 精确定位列表记录，兼容旧客户端不传的情况。
     """
-    item_id: str
-    cookie_id: str | None = None
 
 
 @items_router.delete("/delete", response_model=ApiResponse)
@@ -985,7 +985,7 @@ async def delete_item_unified(
     """删除商品（统一入口，账号可选，兼容账号已删除的孤儿商品）
 
     - 传入 cookie_id：校验账号归属后按账号删除；账号不存在直接报错。
-    - 未传 cookie_id：若商品所属账号仍存在则要求指定账号；账号已删除（孤儿商品）则按商品ID删除。
+    - 未传 cookie_id：仅删除账号已不存在的孤儿记录。
     """
     owner_id, _ = resolve_owner_scope(current_user)
 
@@ -997,7 +997,7 @@ async def delete_item_unified(
         if not account:
             return ApiResponse(success=False, message="账号不存在")
 
-    result = await item_service.delete_item_smart(owner_id, payload.item_id, account)
+    result = await item_service.delete_item_smart(owner_id, payload.item_id, account, payload.catalog_id)
     if result == "ok":
         return ApiResponse(success=True, message="商品已删除")
     if result == "account_required":
@@ -1046,9 +1046,12 @@ async def batch_delete_items(
         account = None
         if cookie_id and cookie_id.lower() not in ("null", ""):
             account = account_map.get(cookie_id)
+            if account is None:
+                not_found_items.append(entry.item_id)
+                continue
 
         # 使用 delete_item_smart 统一处理，兼容孤儿商品
-        result = await item_service.delete_item_smart(owner_id, entry.item_id, account)
+        result = await item_service.delete_item_smart(owner_id, entry.item_id, account, entry.catalog_id)
         if result == "ok":
             removed += 1
         else:

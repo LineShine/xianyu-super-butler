@@ -122,13 +122,13 @@ export const getItemsByCardId = (
 
 // 删除商品（账号可选）
 // - 传入 cookieId：按账号删除
-// - cookieId 为空（账号已删除的孤儿商品）：后端按商品ID删除
-export const deleteItem = (cookieId: string | null | undefined, itemId: string): Promise<ApiResponse> => {
-  return del(`${ITEM_PREFIX}/delete`, { data: { cookie_id: cookieId || null, item_id: itemId } })
+// - catalogId 精确指定目录行；cookieId 为空时仅删除孤儿记录
+export const deleteItem = (cookieId: string | null | undefined, itemId: string, catalogId?: string | number): Promise<ApiResponse> => {
+  return del(`${ITEM_PREFIX}/delete`, { data: { cookie_id: cookieId || null, item_id: itemId, catalog_id: catalogId } })
 }
 
 // 批量删除商品
-export const batchDeleteItems = (ids: { cookie_id: string; item_id: string }[]): Promise<ApiResponse> => {
+export const batchDeleteItems = (ids: { cookie_id: string | null; item_id: string; catalog_id?: string | number }[]): Promise<ApiResponse> => {
   return del(`${ITEM_PREFIX}/batch`, { data: { items: ids } })
 }
 

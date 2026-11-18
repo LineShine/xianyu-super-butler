@@ -11,9 +11,10 @@ class ItemCodeGenerationUpdate(BaseModel):
 
 class ItemTarget(BaseModel):
     # cookie_id 允许为空/None：账号已删除的孤儿商品在列表中 cookie_id 为 null，
-    # 批量删除时原样回传，需接受 None 以便路由按商品ID删除（见 batch_delete_items）。
+    # catalog_id 精确定位该行，不能因同商品存在有效账号记录而误拒绝或误删。
     cookie_id: str | None = None
     item_id: str
+    catalog_id: int | None = Field(default=None, gt=0)
 
 
 class ItemBatchDeleteRequest(BaseModel):
