@@ -21,6 +21,14 @@ import { RefundCancelModal } from './RefundCancelModal'
 import { AgreeDeliverModal } from './AgreeDeliverModal'
 import type { AccountDetail } from '@/types'
 
+const MESSAGE_SYNC_LABELS: Partial<Record<NonNullable<AccountDetail['message_sync_status']>, string>> = {
+  recovering: '重连验证中',
+  relogging_in: '账密重新登录中',
+  verification_required: '等待安全验证',
+  verifying: '等待新消息验证',
+  unhealthy: '消息接收异常',
+}
+
 type ModalType = 'qrcode' | 'password' | 'manual' | 'edit' | 'default-reply' | 'ai-settings' | 'proxy-settings' | 'message-expire-time' | 'reply-delay' | 'face-verification' | 'confirm-receipt' | 'auto-rate' | 'delivery-disabled' | 'refund-cancel' | 'agree-deliver' | null
 type DefaultReplyType = 'text' | 'api' | 'external_contact'
 
@@ -2539,16 +2547,38 @@ export function Accounts() {
                     </td>
                     <td>
                       <span className={`inline-flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded ${
-                        account.online
+                        account.message_sync_status && account.message_sync_status !== 'monitoring' && account.message_sync_status !== 'unhealthy'
+                          ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+                          : account.online
                           ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
                           : 'bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-400'
                       }`}>
                         <span className={`status-dot ${account.online ? 'status-dot-success' : 'status-dot-danger'}`} />
-                        {account.message_sync_status === 'recovering' ? '重连验证中' : account.online ? '在线' : '离线'}
+                        {MESSAGE_SYNC_LABELS[account.message_sync_status ?? 'monitoring'] || (account.online ? '在线' : '离线')}
                       </span>
+                      {account.message_sync_detail && !account.relogin_required && (
+                        <p className="mt-1 max-w-[200px] text-xs text-amber-600 dark:text-amber-400">{account.message_sync_detail}</p>
+                      )}
+                      {account.message_sync_status === 'verification_required' && (
+                        <div className="mt-1 max-w-[200px] text-xs">
+                          {account.message_sync_screenshot_path && (
+                            <button onClick={() => openFaceVerificationModal(account)} className="block text-blue-600 underline">查看验证截图</button>
+                          )}
+                          {account.message_sync_verification_url && (
+                            <a href={account.message_sync_verification_url} target="_blank" rel="noopener noreferrer" className="block text-blue-600 underline">打开安全验证</a>
+                          )}
+                        </div>
+                      )}
                       {account.relogin_required && (
                         <div className="mt-1 max-w-[200px] text-xs text-red-600 dark:text-red-400">
                           <p>{account.offline_reason}</p>
+                          {account.username && account.has_password && (
+                            <button className="mt-1 mr-2 underline" onClick={async () => {
+                              if (!await checkAdminPassword()) return
+                              setPwdAccount(account.username || '')
+                              setActiveModal('password')
+                            }}>账密登录</button>
+                          )}
                           <button className="mt-1 underline" onClick={() => startQRCodeLogin()}>
                             重新扫码登录
                           </button>

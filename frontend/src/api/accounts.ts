@@ -64,6 +64,9 @@ export const getAccountDetailsPaginated = async (
     enabled: boolean
     online?: boolean
     message_sync_status?: AccountDetail['message_sync_status']
+    message_sync_detail?: string
+    message_sync_verification_url?: string
+    message_sync_screenshot_path?: string
     offline_reason?: string
     relogin_required?: boolean
     auto_confirm: boolean
@@ -146,6 +149,9 @@ export const getAccountDetailsPaginated = async (
       enabled: item.enabled,
       online: item.online ?? false,
       message_sync_status: item.message_sync_status,
+      message_sync_detail: item.message_sync_detail,
+      message_sync_verification_url: item.message_sync_verification_url,
+      message_sync_screenshot_path: item.message_sync_screenshot_path,
       offline_reason: item.offline_reason,
       relogin_required: item.relogin_required,
       auto_confirm: item.auto_confirm,

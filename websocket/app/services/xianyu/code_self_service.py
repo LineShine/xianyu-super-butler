@@ -32,10 +32,9 @@ from app.services.xianyu.code_generation_service import (
 
 PROMPT = '请提供订单编号，将自动发放口令（纯数字，不要发送多余内容，避免自动发放失败）'
 FORMAT_HINT = '请仅发送数字订单编号，不要附加其他内容'
-PROCESSING = '已收到，正在自动处理ing...'
 # This is a status notice, never a seller command. Even if its ACK is lost,
 # its own push must not enter the manual generation flow.
-GENERATING = '正在生成口令'
+PROCESSING = '已收到，正在自动生成口令...'
 SCRIPT_ERROR = '机器人回复：自动处理失败，请稍后重试或联系卖家'
 LIMIT_HINT = '该订单今日已领取超过限制'
 WINDOW_MS = 300_000
@@ -354,7 +353,7 @@ class CodeSelfService:
         await self._update(action, stage=stage,
             # 保留平台时间坐标供流程诊断；自动回传仅按确认的消息 ID 判断。
             **({'marker_at_ms': action.claim.timestamp_ms + int((time.monotonic() - action.claim.received.monotonic) * 1000)}
-               if stage == 'marker' else {}))
+               if stage == 'validating' else {}))
         outcome = await self.generator.send_text_confirmed(action.claim, text, websocket)
         await self._update(action, outcome=outcome, sent_text=text)
         if outcome.status != 'success':
@@ -426,7 +425,6 @@ class CodeSelfService:
             await self._notice(action, text, websocket, lock, 'quota_rejected')
             await self._update(action, reason=reason, detail=text, end_state='finished', process_status='skipped')
             return
-        await self._notice(action, GENERATING, websocket, lock, 'marker')
         await self._update(action, stage='scripting')
         try:
             code = await self.generator.generate_code(action.claim, lock, record_output=False)

@@ -162,7 +162,7 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
     def marker_message_id(self):
         for log in reversed(self.records()):
             for text, result in zip(log.reply_segments or [], log.send_result_json or []):
-                if text == self_service.GENERATING:
+                if text == self_service.PROCESSING:
                     return result['ack']['body']['messageId']
         self.fail('Expected a confirmed automatic marker in the persisted reply log')
 
@@ -217,7 +217,7 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_success_has_exact_ordered_messages_and_persisted_quota(self):
         await self.cycle()
-        self.assertEqual(self.sent(), [self_service.PROMPT, self_service.PROCESSING, self_service.GENERATING, 'aB09zZ'])
+        self.assertEqual(self.sent(), [self_service.PROMPT, '已收到，正在自动生成口令...', 'aB09zZ'])
         self.assertEqual(self.runner.await_count, 1)
         self.api.assert_awaited_once_with(cookies='test-only', seller_id='1001', buyer_id='2001', item_id='3001', order_no=ORDER)
         record = next(a for a in self.attempts() if a.order_no)
@@ -277,7 +277,7 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(a.quota_state == 'none' for a in self.attempts()))
         sold['data']['module']['items'][0]['priceVO']['refundFee'] = '0.00'
         await self.submit(order)
-        self.assertEqual(self.sent()[-3:], [self_service.PROCESSING, self_service.GENERATING, 'aB09zZ'])
+        self.assertEqual(self.sent()[-2:], [self_service.PROCESSING, 'aB09zZ'])
         self.runner.assert_awaited_once()
         self.assertEqual(sum(a.quota_state == 'success' for a in self.attempts()), 1)
 
@@ -302,7 +302,7 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
                 original = prefix + order + suffix
                 await self.begin(chat=chat)
                 event = await self.submit(original, chat=chat)
-                self.assertEqual(self.sent()[-3:], [self_service.PROCESSING, self_service.GENERATING, 'aB09zZ'])
+                self.assertEqual(self.sent()[-2:], [self_service.PROCESSING, 'aB09zZ'])
                 self.assertEqual(self.api.await_args.kwargs['order_no'], order)
                 attempt = next(a for a in self.attempts() if a.order_no == order)
                 self.assertEqual((attempt.quota_state, attempt.quota_used), ('success', 1))
@@ -580,7 +580,7 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         reply._record_auto_reply_log = AsyncMock()
         reply._pause_ai_reply_after_manual_message = AsyncMock(return_value=True)
         for mid in (self.marker_message_id(), 'unconfirmed-status-message'):
-            event = message(mid=mid, text=self_service.GENERATING, timestamp=self.clock)
+            event = message(mid=mid, text=self_service.PROCESSING, timestamp=self.clock)
             self.assertFalse(await self.service.handle(event, self.ws))
             await reply.handle_chat_message(event, self.ws)
         self.runner.assert_awaited_once()
@@ -697,8 +697,8 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.cycle()
         self.assertEqual(next(a for a in self.attempts() if a.order_no).quota_day, '2026-10-27')
 
-    async def test_prompt_processing_and_marker_unknown_stop_pipeline(self):
-        for target in (self_service.PROMPT, self_service.PROCESSING, self_service.GENERATING):
+    async def test_prompt_and_processing_unknown_stop_pipeline(self):
+        for target in (self_service.PROMPT, self_service.PROCESSING):
             self.instance = self.make_instance('1001')
             self.auto = self_service.CodeSelfService('1001', self.instance)
             self.send_behavior(target, 'unknown')
@@ -775,4 +775,4 @@ class SelfServiceTests(unittest.IsolatedAsyncioTestCase):
         reply._record_auto_reply_log.assert_not_awaited()
         self.runner.assert_awaited_once()
         self.assertEqual(self.sent(), [self_service.PROMPT, self_service.FORMAT_HINT,
-                                      self_service.FORMAT_HINT, self_service.PROCESSING, self_service.GENERATING, 'aB09zZ'])
+                                      self_service.FORMAT_HINT, self_service.PROCESSING, 'aB09zZ'])

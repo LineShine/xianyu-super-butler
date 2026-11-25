@@ -17,9 +17,14 @@ SCOPE = dict(order_no=ORDER, seller_id='1001', buyer_id='2001', item_id='3001')
 FIXTURES = Path(__file__).parent / 'fixtures'
 
 
-def responses():
-    return [json.loads((FIXTURES / f'code_order_shipped_{kind}.json').read_text())
-            for kind in ('detail', 'sold')]
+def responses(*, detail_title=None, sold_title=None):
+    detail, sold = [json.loads((FIXTURES / f'code_order_shipped_{kind}.json').read_text())
+                    for kind in ('detail', 'sold')]
+    if detail_title is not None:
+        detail['data']['components'][0]['data']['orderStatusInfo']['title'] = detail_title
+    if sold_title is not None:
+        sold['data']['module']['items'][0]['commonData']['orderStatus'] = sold_title
+    return detail, sold
 
 
 class OfficialOrderContractTests(unittest.TestCase):
@@ -34,6 +39,48 @@ class OfficialOrderContractTests(unittest.TestCase):
         result = self.validate()
         self.assertTrue(result.allowed, result)
         self.assertEqual(result.reason, 'code_order_valid')
+
+    def test_completed_awaiting_collection_allowed_in_either_response(self):
+        for detail_title, sold_title in (
+            ('交易成功，待收款', '交易成功'),
+            ('交易成功', '交易成功，待收款'),
+            ('交易成功，待收款', '交易成功，待收款'),
+        ):
+            with self.subTest(detail_title=detail_title, sold_title=sold_title):
+                self.detail, self.sold = responses(detail_title=detail_title, sold_title=sold_title)
+                result = self.validate()
+                self.assertTrue(result.allowed, result)
+                self.assertEqual(result.reason, 'code_order_valid')
+
+    def test_awaiting_collection_still_requires_identity_and_no_refund(self):
+        for section, field, value, reason in (
+            ('commonData', 'inRefund', True, 'code_order_refunding'),
+            ('priceVO', 'refundFee', '0.01', 'code_order_refunded'),
+            ('priceVO', 'refundFee', None, 'code_order_unknown'),
+            ('commonData', 'inRefund', None, 'code_order_unknown'),
+            ('buyerInfoVO', 'buyerId', '9999', 'code_order_buyer'),
+            ('commonData', 'itemId', '9999', 'code_order_item'),
+        ):
+            with self.subTest(field=field, value=value):
+                self.detail, self.sold = responses(
+                    detail_title='交易成功，待收款', sold_title='交易成功，待收款')
+                self.sold['data']['module']['items'][0][section][field] = value
+                result = self.validate()
+                self.assertFalse(result.allowed)
+                self.assertEqual(result.reason, reason)
+
+    def test_awaiting_collection_does_not_override_unpaid_evidence(self):
+        for field in ('isPaid', 'paid', 'payment_node'):
+            with self.subTest(field=field):
+                self.detail, self.sold = responses(
+                    detail_title='交易成功，待收款', sold_title='交易成功，待收款')
+                if field == 'payment_node':
+                    self.detail['data']['components'][0]['data']['orderStatusNodeList'][1]['completed'] = False
+                else:
+                    self.detail['data'][field] = False
+                result = self.validate()
+                self.assertFalse(result.allowed)
+                self.assertEqual(result.detail, '订单付款信息不一致，请联系卖家')
 
     def test_seller_role_requires_matching_authenticated_cookie_identity(self):
         for authenticated in (None, '', '9999'):

@@ -46,7 +46,10 @@ export interface Account {
   cookie: string
   enabled: boolean
   online?: boolean  // 在线状态：是否已建立真实 WebSocket 连接（口径同仪表盘“在线账号”）
-  message_sync_status?: 'monitoring' | 'recovering' | 'unhealthy'
+  message_sync_status?: 'monitoring' | 'recovering' | 'relogging_in' | 'verification_required' | 'verifying' | 'unhealthy'
+  message_sync_detail?: string
+  message_sync_verification_url?: string
+  message_sync_screenshot_path?: string
   offline_reason?: string
   relogin_required?: boolean
   use_ai_reply: boolean

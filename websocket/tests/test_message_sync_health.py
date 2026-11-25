@@ -31,7 +31,9 @@ def push(mid='new', stamp=2000, sender='2001'):
 class HealthTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.instance = SimpleNamespace(cookie_id='1001', myid='1001', _registered_ws=object(),
-                                        _pending_mid_futures={}, _reconnect_with_new_token=AsyncMock(return_value=True))
+                                        _pending_mid_futures={}, _reconnect_with_new_token=AsyncMock(return_value=True),
+                                        _cookie_token_manager=SimpleNamespace(
+                                            try_password_login_refresh=AsyncMock(return_value='no_credentials')))
         self.health = MessageSyncHealth(self.instance)
         self.health.write_risk_log = AsyncMock()
         self.now = 0
@@ -69,12 +71,152 @@ class HealthTests(unittest.IsolatedAsyncioTestCase):
                 await self.health.poll(self.instance._registered_ws)
         self.assertEqual(self.instance._reconnect_with_new_token.await_count, 2)
         await self.health.flush_events()
-        self.assertEqual(self.health.write_risk_log.await_count, 3)
+        self.assertEqual(self.health.write_risk_log.await_count, 4)
         self.assertIn('重试 2 次', self.health.write_risk_log.call_args.args[1])
         self.assertTrue(self.health.status()['relogin_required'])
         self.health.observe(push('fresh', 6000))
         self.assertFalse(self.health.unhealthy)
         self.assertEqual(self.health.recovery_attempts, 0)
+
+    async def reach_password_login(self, result=True):
+        self.instance._cookie_token_manager.try_password_login_refresh.return_value = result
+        await self.baseline()
+        for i in range(3):
+            self.miss(f'miss-{i}', 2000 + i * 1000)
+            await self.health.recover()
+            if i < 2:
+                self.health.request.return_value = listing(f'miss-{i}', 2000 + i * 1000)
+                await self.health.poll(self.instance._registered_ws)
+
+    def rebuild_health(self):
+        old = self.health
+        self.health = MessageSyncHealth(self.instance)
+        self.health.restore_recovery(old.recovery_snapshot())
+        self.health.write_risk_log = AsyncMock()
+        return old
+
+    async def test_two_token_retries_then_real_login_and_new_instance_verifies_fresh_push(self):
+        await self.reach_password_login()
+        self.assertEqual(self.instance._reconnect_with_new_token.await_count, 2)
+        login = self.instance._cookie_token_manager.try_password_login_refresh
+        login.assert_awaited_once()
+        self.assertTrue(login.call_args.kwargs['force_password_login'])
+        self.assertFalse(self.health.status()['relogin_required'])
+        self.health.observe(push('old-socket', 4500))
+        self.assertEqual(self.health.recovery_attempts, 2)
+        self.rebuild_health()
+        self.assertEqual(self.health.status()['message_sync_status'], 'verifying')
+        self.assertEqual(self.health.password_login_attempts, 1)
+        self.health.observe(push('before-baseline', 5000))
+        self.assertEqual(self.health.recovery_attempts, 2)
+        self.health.request = AsyncMock(return_value=listing('before-baseline', 5000))
+        await self.health.poll(self.instance._registered_ws)
+        self.health.observe(push('old', 4000))
+        self.health.observe(push('wrong-direction', 6000, sender='1001'))
+        self.assertEqual(self.health.status()['message_sync_status'], 'verifying')
+        self.now += 3600
+        await self.health.poll(self.instance._registered_ws)
+        self.assertFalse(self.health.unhealthy)
+        self.assertEqual(self.health.status()['message_sync_status'], 'verifying')
+        self.health.observe(push('fresh', 7000))
+        self.assertEqual(self.health.status()['message_sync_status'], 'monitoring')
+        self.assertEqual(self.health.password_login_attempts, 0)
+
+    async def test_new_miss_after_password_login_stops_without_another_login(self):
+        await self.reach_password_login()
+        self.rebuild_health()
+        self.health.request = AsyncMock(return_value=listing('after-login', 5000))
+        await self.health.poll(self.instance._registered_ws)
+        self.miss('still-missing', 6000)
+        await self.health.recover()
+        await self.health.recover()
+        self.assertTrue(self.health.unhealthy)
+        self.assertEqual(self.health.recovery_attempts, 2)
+        self.instance._cookie_token_manager.try_password_login_refresh.assert_awaited_once()
+        self.assertIn('仍漏收新消息', self.health.status()['offline_reason'])
+
+    async def test_face_verification_is_exposed_and_failure_requires_manual_action(self):
+        async def login(*args, on_verification, **kwargs):
+            on_verification('人脸验证', '/test.png', 'https://example.test/verify')
+            status = self.health.status()
+            self.assertEqual(status['message_sync_status'], 'verification_required')
+            self.assertEqual(status['message_sync_verification_url'], 'https://example.test/verify')
+            self.assertFalse(status['relogin_required'])
+            return False
+        self.instance._cookie_token_manager.try_password_login_refresh.side_effect = login
+        await self.reach_password_login()
+        self.assertTrue(self.health.unhealthy)
+        self.assertIn('人脸或安全验证', self.health.status()['offline_reason'])
+        self.assertFalse(self.health.status()['message_sync_verification_url'])
+
+    async def test_login_cooldown_retries_are_bounded_and_do_not_reset_token_budget(self):
+        await self.reach_password_login('skipped_cooldown')
+        self.assertEqual(self.health.password_login_attempts, 0)
+        login = self.instance._cookie_token_manager.try_password_login_refresh
+        await self.health.recover()
+        login.assert_awaited_once()
+        self.now += 61
+        await self.health.recover()
+        self.assertEqual(login.await_count, 2)
+        self.assertEqual(self.instance._reconnect_with_new_token.await_count, 2)
+        self.now += 600
+        await self.health.recover()
+        self.assertTrue(self.health.unhealthy)
+        self.assertEqual(login.await_count, 2)
+
+    async def test_login_exception_is_terminal_for_this_incident(self):
+        self.instance._cookie_token_manager.try_password_login_refresh.side_effect = RuntimeError('fixture')
+        await self.reach_password_login()
+        await self.health.recover()
+        self.instance._cookie_token_manager.try_password_login_refresh.assert_awaited_once()
+        self.assertTrue(self.health.unhealthy)
+
+    async def test_cancelled_login_does_not_leave_permanent_login_spinner(self):
+        self.instance._cookie_token_manager.try_password_login_refresh.side_effect = asyncio.CancelledError
+        with self.assertRaises(asyncio.CancelledError):
+            await self.reach_password_login()
+        self.assertTrue(self.health.unhealthy)
+        self.assertFalse(self.health.awaiting_rebuild)
+        self.assertIn('已中断', self.health.status()['offline_reason'])
+
+    async def test_expected_restart_cancellation_keeps_state_for_replacement(self):
+        self.instance._instance_restart_scheduled = True
+        self.instance._cookie_token_manager.try_password_login_refresh.side_effect = asyncio.CancelledError
+        with self.assertRaises(asyncio.CancelledError):
+            await self.reach_password_login()
+        self.assertFalse(self.health.unhealthy)
+        self.rebuild_health()
+        self.assertEqual(self.health.status()['message_sync_status'], 'verifying')
+        self.assertEqual(self.health.password_login_attempts, 1)
+
+    async def test_due_login_retry_runs_even_if_history_queries_fail(self):
+        await self.reach_password_login('skipped_cooldown')
+        login = self.instance._cookie_token_manager.try_password_login_refresh
+        login.return_value = True
+        self.now += 61
+        self.health.poll = AsyncMock(side_effect=ConnectionError())
+        with patch('app.services.xianyu.message_sync_health.asyncio.sleep', side_effect=asyncio.CancelledError):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.health.run()
+        self.assertEqual(login.await_count, 2)
+        self.assertEqual(self.health.status()['message_sync_status'], 'verifying')
+
+    async def test_credential_failure_has_specific_reason_and_does_not_retry(self):
+        for result, expected in [('no_credentials', '未配置可用账密'),
+                                 ('credential_unavailable', '无法解密'),
+                                 ('verification_required', '人脸或安全验证'),
+                                 ('account_disabled', '已停用')]:
+            with self.subTest(result=result):
+                self.health = MessageSyncHealth(self.instance)
+                self.health.recovery_attempts = 2
+                login = self.instance._cookie_token_manager.try_password_login_refresh
+                login.reset_mock()
+                login.return_value = result
+                await self.health.recover()
+                await self.health.recover()
+                self.assertTrue(self.health.unhealthy)
+                self.assertIn(expected, self.health.status()['offline_reason'])
+                login.assert_awaited_once()
 
     async def test_connection_failures_exhaust_only_two_retries(self):
         self.instance._reconnect_with_new_token.return_value = False

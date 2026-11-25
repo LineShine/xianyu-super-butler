@@ -195,6 +195,7 @@ class CookieManager:
         cookie_id: str,
         cookie_value: str,
         user_id: Optional[int] = None,
+        message_sync_state=None,
     ):
         """在事件循环中启动 XianyuAsync.main
 
@@ -220,6 +221,10 @@ class CookieManager:
                 cookie_id=cookie_id,
                 user_id=user_id
             )
+            if message_sync_state:
+                xianyu.message_sync_health.restore_recovery(message_sync_state)
+                if message_sync_state.get('awaiting_rebuild'):
+                    xianyu._cookie_token_manager._require_fresh_token = True
             
             # 保存实例引用
             self.instances[cookie_id] = xianyu
@@ -243,11 +248,18 @@ class CookieManager:
         cookie_id: str,
         cookie_value: str,
         user_id: Optional[int] = None,
+        *, replacing_instance=None,
     ):
         """异步添加Cookie并启动任务"""
         lock = await self._get_task_lock(cookie_id)
         
         async with lock:
+            # A delayed automatic restart must not resurrect a removed/disabled
+            # account or overwrite a newer manual login.
+            if replacing_instance is not None and (
+                    self.instances.get(cookie_id) is not replacing_instance
+                    or not self.get_cookie_status(cookie_id)):
+                return False
             # 检查是否已存在任务
             if cookie_id in self.tasks:
                 existing_task = self.tasks[cookie_id]
@@ -266,6 +278,12 @@ class CookieManager:
                     self.tasks.pop(cookie_id, None)
                     logger.info(f"【{cookie_id}】旧任务已完成，已移除")
             
+            message_sync_state = None
+            if replacing_instance is not None:
+                if not self.get_cookie_status(cookie_id):
+                    return False
+                message_sync_state = replacing_instance.message_sync_health.recovery_snapshot()
+
             # 更新内存
             self.cookies[cookie_id] = cookie_value
             if user_id is not None:
@@ -275,10 +293,11 @@ class CookieManager:
             
             # 创建并启动任务
             loop = self._get_loop()
-            task = loop.create_task(self._run_xianyu(cookie_id, cookie_value, user_id))
+            task = loop.create_task(self._run_xianyu(cookie_id, cookie_value, user_id, message_sync_state))
             self.tasks[cookie_id] = task
             
             logger.info(f"已启动账号任务: {cookie_id} (用户ID: {user_id})")
+            return True
 
     async def _remove_cookie_async(self, cookie_id: str):
         """异步移除Cookie"""

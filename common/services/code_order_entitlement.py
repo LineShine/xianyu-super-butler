@@ -198,7 +198,8 @@ def _validate_order_response(raw: dict, *, order_no: str, seller_id: str,
         return denied('code_order_closed', '订单已关闭')
     if any('待付款' in title or '未付款' in title for title in titles):
         return denied('code_order_unpaid', '订单尚未付款')
-    paid_titles = {'待发货', '已发货', '待收货', '交易成功', '已完成', '已发货，待买家确认收货'}
+    # 微信支付订单交易成功后可能仍待卖家收款，买家已付款。
+    paid_titles = {'待发货', '已发货', '待收货', '交易成功', '交易成功，待收款', '已完成', '已发货，待买家确认收货'}
     if not titles or not titles.issubset(paid_titles):
         return denied('code_order_unknown', '无法确认订单已付款且有效，请联系卖家')
     for s in [*sources, *status_sources]:

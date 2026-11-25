@@ -521,7 +521,7 @@ class XianyuAsync:
         """
         if reason:
             logger.info(f"【{self.cookie_id}】重启原因: {reason}")
-        await self._restart_instance()
+        return await self._restart_instance()
     
     async def _restart_instance(self):
         """重启XianyuLive实例
@@ -545,23 +545,33 @@ class XianyuAsync:
                     try:
                         await asyncio.sleep(2.0)
                         # 直接调用异步方法
-                        await cookie_manager._stop_task_async(self.cookie_id)
-                        await cookie_manager._add_cookie_async(self.cookie_id, self.cookies_str, self.user_id)
-                        logger.info(f"【{self.cookie_id}】实例重启请求已触发")
+                        restarted = await cookie_manager._add_cookie_async(
+                            self.cookie_id, self.cookies_str, self.user_id, replacing_instance=self)
+                        if restarted:
+                            logger.info(f"【{self.cookie_id}】实例重启请求已触发")
+                        elif cookie_manager.instances.get(self.cookie_id) is self:
+                            self._instance_restart_scheduled = False
+                            self.message_sync_health.mark_unhealthy('账号已停用，自动重建已停止，请检查账号状态')
                     except Exception as e:
+                        self._instance_restart_scheduled = False
+                        self.message_sync_health.mark_unhealthy('账号实例重建失败，请检查日志并手动重新登录')
                         logger.error(f"【{self.cookie_id}】触发实例重启失败: {e}")
                 
                 # 创建后台任务，不等待它完成
+                self._instance_restart_scheduled = True
                 asyncio.create_task(delayed_restart())
                 
                 logger.info(f"【{self.cookie_id}】实例重启已调度，当前任务即将退出...")
                 logger.warning(f"【{self.cookie_id}】注意：重启请求已调度，CookieManager将在2秒后取消当前任务并启动新实例")
+                return True
                     
             else:
                 logger.warning(f"【{self.cookie_id}】CookieManager不可用，无法重启实例")
+                return False
 
         except Exception as e:
             logger.error(f"【{self.cookie_id}】重启实例失败: {self._safe_str(e)}")
+            return False
     
     def _safe_str(self, obj):
         """安全地将对象转换为字符串（委托公共实现）"""
